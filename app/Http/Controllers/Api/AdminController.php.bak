@@ -1,0 +1,1622 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\Product;
+use App\Models\Category;
+use App\Models\Order;
+use App\Models\User;
+use App\Models\Blog;
+use App\Models\Slider;
+use App\Models\Banner;
+use App\Models\Testimonial;
+use App\Models\Faq;
+use App\Models\Page;
+use App\Models\Coupon;
+use App\Models\Review;
+use App\Models\OrderItem;
+use App\Models\Attribute;
+use App\Models\AttributeValue;
+use App\Traits\ApiResponse;
+use App\Models\Notification as NotificationModel;
+use App\Models\PaymentGateway;
+use App\Models\PaymentTransaction;
+use App\Models\VendorShop;
+use App\Models\DeliveryPartner;
+use App\Models\DeliveryBooking;
+use App\Models\ShippingZone;
+use App\Models\ShippingMethod;
+use App\Models\Brand;
+use App\Models\FlashSale;
+use App\Models\Campaign;
+use App\Models\Subscriber;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+
+class AdminController extends Controller
+{
+    use ApiResponse;
+    // ==================== DASHBOARD ====================    
+    public function dashboard(): JsonResponse
+    {
+
+        $totalRevenue = Order::where('payment_status', 'paid')->sum('total');
+        $totalOrders = Order::count();
+        $totalProducts = Product::count();
+        $totalCustomers = User::where('role', 'customer')->count();
+        $pendingOrders = Order::where('status', 'pending')->count();
+        $recentOrders = Order::with('user')->latest()->limit(10)->get();        // Growth calculations (vs previous month)        $currentMonthRevenue = Order::where('payment_status', 'paid')            ->whereMonth('created_at', now()->month)            ->whereYear('created_at', now()->year)            ->sum('total');        $previousMonthRevenue = Order::where('payment_status', 'paid')            ->whereMonth('created_at', now()->subMonth()->month)            ->whereYear('created_at', now()->subMonth()->year)            ->sum('total');        $revenueGrowth = $previousMonthRevenue > 0            ? round((($currentMonthRevenue - $previousMonthRevenue) / $previousMonthRevenue) * 100, 2)            : 0;        $currentMonthOrders = Order::whereMonth('created_at', now()->month)            ->whereYear('created_at', now()->year)            ->count();        $previousMonthOrders = Order::whereMonth('created_at', now()->subMonth()->month)            ->whereYear('created_at', now()->subMonth()->year)            ->count();        $orderGrowth = $previousMonthOrders > 0            ? round((($currentMonthOrders - $previousMonthOrders) / $previousMonthOrders) * 100, 2)            : 0;        // Top products by sales        $topProducts = Product::with(['category', 'brand', 'images'])            ->orderBy('sales_count', 'desc')            ->limit(10)            ->get();        // Revenue chart (last 7 days)        $revenueChart = collect();        $ordersChart = collect();        for ($i = 6; $i >= 0; $i--) {            $date = now()->subDays($i)->toDateString();            $dayRevenue = Order::where('payment_status', 'paid')                ->whereDate('created_at', $date)                ->sum('total');            $dayOrders = Order::whereDate('created_at', $date)                ->count();            $revenueChart->push(['date' => $date, 'amount' => (float) $dayRevenue]);            $ordersChart->push(['date' => $date, 'count' => $dayOrders]);        }        // Orders by status        $ordersByStatus = Order::selectRaw('status, count(*) as count')            ->groupBy('status')            ->pluck('count', 'status')            ->map(fn($count, $status) => ['status' => $status, 'count' => $count])            ->values()            ->toArray();        // Revenue by category (top 6)        $revenueByCategory = Order::join('order_items', 'orders.id', '=', 'order_items.order_id')            ->join('products', 'order_items.product_id', '=', 'products.id')            ->join('categories', 'products.category_id', '=', 'categories.id')            ->where('orders.payment_status', 'paid')            ->selectRaw('categories.name as category, sum(order_items.price * order_items.quantity) as revenue')            ->groupBy('categories.name')            ->orderByDesc('revenue')            ->limit(6)            ->pluck('revenue', 'category')            ->map(fn($revenue, $cat) => ['category' => $cat, 'revenue' => (float) $revenue])            ->values()            ->toArray();        return $this->success([            'total_revenue' => (float) $totalRevenue,            'total_orders' => $totalOrders,            'total_products' => $totalProducts,            'total_customers' => $totalCustomers,            'pending_orders' => $pendingOrders,            'revenue_growth' => $revenueGrowth,            'order_growth' => $orderGrowth,            'recent_orders' => $recentOrders,            'top_products' => $topProducts,            'revenue_chart' => $revenueChart,            'orders_chart' => $ordersChart,            'orders_by_status' => $ordersByStatus,            'revenue_by_category' => $revenueByCategory,        ]);    }    // ==================== PRODUCTS ====================    public function getProducts(Request $request): JsonResponse    {        $query = Product::with(['category', 'brand', 'images']);        if ($search = $request->search) {            $query->where('name', 'like', "%{$search}%");        }        $result = $this->paginated($query->latest());        return $this->success($result);    }    public function createProduct(Request $request): JsonResponse    {        $validated = $request->validate([            'name' => 'required|string|max:255',            'slug' => 'required|string|unique:products,slug',            'description' => 'required|string',            'short_description' => 'nullable|string',            'price' => 'required|numeric|min:0',            'compare_price' => 'nullable|numeric|min:0',            'cost_price' => 'nullable|numeric|min:0',            'discount_percentage' => 'nullable|numeric|min:0|max:100',            'sku' => 'nullable|string',            'stock_quantity' => 'required|integer|min:0',            'category_id' => 'required|exists:categories,id',            'brand_id' => 'nullable|exists:brands,id',            'is_active' => 'sometimes|boolean',            'is_featured' => 'sometimes|boolean',            'is_flash_sale' => 'sometimes|boolean',            'is_best_seller' => 'sometimes|boolean',            'tags' => 'nullable|array',            'colors' => 'nullable|array',            'sizes' => 'nullable|array',        ]);        $validated['is_active'] = $validated['is_active'] ?? true;        $validated['is_featured'] = $validated['is_featured'] ?? false;        $validated['is_flash_sale'] = $validated['is_flash_sale'] ?? false;        $validated['is_best_seller'] = $validated['is_best_seller'] ?? false;
+
+        // Extract colors and sizes before creating product
+        $colors = $validated['colors'] ?? [];
+        $sizes = $validated['sizes'] ?? [];
+        unset($validated['colors'], $validated['sizes']);
+
+        $product = Product::create($validated);
+
+        // Handle colors and sizes as attributes
+        $this->syncProductAttributes($product, $colors, $sizes);
+
+        // Handle images
+        if ($request->hasFile('images')) {
+            foreach ($request->file('images') as $index => $image) {
+                $path = $image->store('products', 'public');
+                $product->images()->create([
+                    'image' => $path,
+                    'sort_order' => $index,
+                    'is_primary' => $index === 0,
+                ]);
+            }
+        }
+        return $this->success($product->load('images'), 'Product created', 201);
+    }
+    public function updateProduct(Request $request, int $id): JsonResponse
+    {
+        $product = Product::findOrFail($id);
+        $validated = $request->validate(['name' => 'sometimes|string|max:255',            'slug' => 'sometimes|string|unique:products,slug,' . $id,            'description' => 'sometimes|string',            'short_description' => 'nullable|string',            'price' => 'sometimes|numeric|min:0',            'compare_price' => 'nullable|numeric|min:0',            'cost_price' => 'nullable|numeric|min:0',            'discount_percentage' => 'nullable|numeric|min:0|max:100',            'sku' => 'nullable|string',            'stock_quantity' => 'sometimes|integer|min:0',            'category_id' => 'sometimes|exists:categories,id',            'brand_id' => 'nullable|exists:brands,id',            'is_active' => 'sometimes|boolean',            'is_featured' => 'sometimes|boolean',            'is_flash_sale' => 'sometimes|boolean',            'is_best_seller' => 'sometimes|boolean',            'tags' => 'nullable|array',            'colors' => 'nullable|array',            'sizes' => 'nullable|array',]);
+
+        // Extract colors and sizes before updating product
+        $colors = $validated['colors'] ?? [];
+        $sizes = $validated['sizes'] ?? [];
+        unset($validated['colors'], $validated['sizes']);
+
+        $product->update($validated);
+
+        // Handle colors and sizes as attributes
+        $this->syncProductAttributes($product, $colors, $sizes);
+
+        if ($request->hasFile('images')) {
+            // Delete old images
+            foreach ($product->images as $img) {
+                Storage::disk('public')->delete($img->image);
+            }
+            $product->images()->delete();
+            foreach ($request->file('images') as $index => $image) {
+                $path = $image->store('products', 'public');
+                $product->images()->create([
+                    'image' => $path,
+                    'sort_order' => $index,
+                    'is_primary' => $index === 0,
+                ]);
+            }
+        }
+        return $this->success($product->fresh()->load('images'), 'Product updated');
+    }
+    public function deleteProduct(int $id): JsonResponse
+    {
+        $product = Product::findOrFail($id);
+        foreach ($product->images as $img) {
+            Storage::disk('public')->delete($img->image);
+        }
+        $product->delete();
+        return $this->success(null, 'Product deleted');
+    }
+
+    /**
+     * Sync product colors and sizes as attributes
+     */
+    private function syncProductAttributes(Product $product, array $colors, array $sizes): void
+    {
+        // Get or create Color attribute
+        $colorAttribute = Attribute::firstOrCreate(['name' => 'Color'], ['type' => 'color']);
+        // Get or create Size attribute
+        $sizeAttribute = Attribute::firstOrCreate(['name' => 'Size'], ['type' => 'size']);
+
+        // Sync color values
+        $colorValueIds = [];
+        foreach ($colors as $color) {
+            $colorValue = AttributeValue::firstOrCreate(
+                ['attribute_id' => $colorAttribute->id, 'value' => $color],
+                ['color_code' => null]
+            );
+            $colorValueIds[] = $colorValue->id;
+        }
+
+        // Sync size values
+        $sizeValueIds = [];
+        foreach ($sizes as $size) {
+            $sizeValue = AttributeValue::firstOrCreate(
+                ['attribute_id' => $sizeAttribute->id, 'value' => $size]
+            );
+            $sizeValueIds[] = $sizeValue->id;
+        }
+
+        // Sync product attributes (many-to-many)
+        $allValueIds = array_merge($colorValueIds, $sizeValueIds);
+        $product->attributes()->sync($allValueIds);
+    }
+
+    // ==================== CATEGORIES ====================   
+    public function getCategories(): JsonResponse
+    {
+        $categories = Category::withCount('products')->latest()->get();
+        return $this->success($categories);
+    }
+    public function createCategory(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|unique:categories,slug',
+            'description' => 'nullable|string',
+            'parent_id' => 'nullable|exists:categories,id',
+            'sort_order' => 'sometimes|integer',
+            'is_active' => 'sometimes|boolean',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        if ($request->hasFile('image')) {
+            $validated['image'] = $request->file('image')->store('categories', 'public');
+        }
+        $category = Category::create($validated);
+        return $this->success($category, 'Category created', 201);
+    }
+
+    public function updateCategory(Request $request, int $id): JsonResponse
+    {
+        $category = Category::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'slug' => 'sometimes|string|unique:categories,slug,' . $id,
+            'description' => 'nullable|string',
+            'parent_id' => 'nullable|exists:categories,id',
+            'sort_order' => 'sometimes|integer',
+            'is_active' => 'sometimes|boolean',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+        ]);
+        if ($request->hasFile('image')) {
+            Storage::disk('public')->delete($category->image);
+            $validated['image'] = $request->file('image')->store('categories', 'public');
+        }
+        $category->update($validated);
+        return $this->success($category->fresh(), 'Category updated');
+    }
+    public function toggleCategoryStatus(int $id): JsonResponse
+    {
+        $category = Category::findOrFail($id);
+        $category->update(['is_active' => !$category->is_active]);
+        return $this->success($category->fresh(), 'Category status updated');
+    }
+    public function deleteCategory(int $id): JsonResponse
+    {
+        $category = Category::findOrFail($id);
+        if ($category->image) {
+            Storage::disk('public')->delete($category->image);
+        }
+        $category->delete();
+        return $this->success(null, 'Category deleted');
+    }
+    // ==================== BRANDS ==================== 
+    public function getBrands(): JsonResponse
+    {
+        $brands = Brand::withCount('products')->latest()->get();
+        return $this->success($brands);
+    }
+    public function createBrand(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|max:255|unique:brands,slug',
+            'description' => 'nullable|string',
+            'logo' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+        ]);
+        if ($request->hasFile('logo')) {
+            $validated['logo'] = $request->file('logo')->store('brands', 'public');
+        }
+        $brand = Brand::create($validated);
+        return $this->success($brand, 'Brand created', 201);
+    }
+    public function updateBrand(Request $request, int $id): JsonResponse
+    {
+        $brand = Brand::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'slug' => 'sometimes|string|max:255|unique:brands,slug,' . $id,
+            'description' => 'nullable|string',
+            'logo' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+        ]);
+        if ($request->hasFile('logo')) {
+            if ($brand->logo) {
+                Storage::disk('public')->delete($brand->logo);
+            }
+            $validated['logo'] = $request->file('logo')->store('brands', 'public');
+        }
+        $brand->update($validated);
+        return $this->success($brand->fresh(), 'Brand updated');
+    }
+    public function toggleBrandStatus(int $id): JsonResponse
+    {
+        $brand = Brand::findOrFail($id);
+        $brand->update(['is_active' => !$brand->is_active]);
+        return $this->success($brand->fresh(), 'Brand status updated');
+    }
+    public function deleteBrand(int $id): JsonResponse
+    {
+        $brand = Brand::findOrFail($id);
+        if ($brand->logo) {
+            Storage::disk('public')->delete($brand->logo);
+        }
+        $brand->delete();
+        return $this->success(null, 'Brand deleted');
+    }
+    // ==================== ORDERS ====================   
+    public function getOrders(Request $request): JsonResponse
+    {
+        $query = Order::with(['user', 'items']);
+        if ($status = $request->status) {
+            $query->where('status', $status);
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function updateOrderStatus(Request $request, int $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => 'required|string|in:pending,confirmed,processing,shipped,delivered,cancelled,returned',
+        ]);
+        $order = Order::findOrFail($id);
+        $oldStatus = $order->status;
+        $order->update($validated);
+        if ($validated['status'] === 'shipped') {
+            $order->update(['shipped_at' => now()]);
+        }
+        if ($validated['status'] === 'delivered') {
+            $order->update(['delivered_at' => now()]);
+        }
+        // Send status change notification        
+        app(NotificationService::class)->orderStatusChanged($order->fresh(), $oldStatus);
+        return $this->success($order->fresh()->load('user'), 'Order status updated');
+    }
+    public function addTrackingNumber(Request $request, int $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'tracking_number' => 'required|string',
+        ]);
+        $order = Order::findOrFail($id);
+        $order->update(['tracking_number' => $validated['tracking_number']]);
+        // Send shipping update notification        
+        app(NotificationService::class)->orderStatusChanged($order->fresh());
+        return $this->success($order, 'Tracking number added');
+    }
+    // ==================== CUSTOMERS ====================   
+    public function getCustomers(Request $request): JsonResponse
+    {
+        $query = User::where('role', 'customer');
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%");
+            });
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    // ==================== REPORTS ====================    
+    public function salesReport(Request $request): JsonResponse
+    {
+        $from = $request->get('from', now()->startOfMonth()->toDateString());
+        $to = $request->get('to', now()->toDateString());
+        $orders = Order::where('payment_status', 'paid')
+            ->whereBetween('created_at', [$from, $to . ' 23:59:59']);
+        return $this->success([
+            'total_sales' => $orders->sum('total'),
+            'total_orders' => $orders->count(),
+            'average_order' => $orders->avg('total'),
+        ]);
+    }
+    // ==================== SETTINGS ====================   
+    public function getSettings(): JsonResponse
+    {
+        $defaults = [
+            'store_name' => config('app.name'),
+            'currency' => 'BDT',
+            'tax_rate' => 0,
+            'shipping_cost_dhaka' => 60,
+            'shipping_cost_outside' => 120,
+            // Topbar            
+            'topbar_phone' => '+880 1700-000000',
+            'topbar_email' => 'info@shayanmart.com',
+            'topbar_address' => 'Dhaka, Bangladesh',
+            'topbar_show_phone' => true,
+            'topbar_show_email' => true,
+            'topbar_show_address' => true,
+            'topbar_show_track_order' => true,
+        ];
+        $saved = cache()->get('admin_settings', []);
+        return $this->success(array_merge($defaults, $saved));
+    }
+    public function updateSettings(Request $request): JsonResponse
+    {
+        $data = $request->all();
+        $existing = cache()->get('admin_settings', []);
+        $merged = array_merge($existing, $data);
+        cache()->set('admin_settings', $merged);
+        return $this->success($merged, 'Settings updated');
+    }
+
+    // ==================== COUPONS ====================  
+    public function getCoupons(): JsonResponse
+    {
+        $coupons = Coupon::latest()->get();
+        return $this->success($coupons);
+    }
+    public function createCoupon(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'code' => 'required|string|unique:coupons,code',
+            'type' => 'required|string|in:percentage,fixed',
+            'value' => 'required|numeric|min:0',
+            'minimum_order' => 'nullable|numeric|min:0',
+            'maximum_discount' => 'nullable|numeric|min:0',
+            'usage_limit' => 'nullable|integer|min:0',
+            'is_active' => 'sometimes|boolean',
+            'expires_at' => 'nullable|date',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $coupon = Coupon::create($validated);
+        return $this->success($coupon, 'Coupon created', 201);
+    }
+    public function updateCoupon(Request $request, int $id): JsonResponse
+    {
+        $coupon = Coupon::findOrFail($id);
+        $validated = $request->validate([
+            'code' => 'sometimes|string|unique:coupons,code,' . $id,
+            'type' => 'sometimes|string|in:percentage,fixed',
+            'value' => 'sometimes|numeric|min:0',
+            'minimum_order' => 'nullable|numeric|min:0',
+            'maximum_discount' => 'nullable|numeric|min:0',
+            'usage_limit' => 'nullable|integer|min:0',
+            'is_active' => 'sometimes|boolean',
+            'expires_at' => 'nullable|date',
+        ]);
+        $coupon->update($validated);
+        return $this->success($coupon->fresh(), 'Coupon updated');
+    }
+    public function deleteCoupon(int $id): JsonResponse
+    {
+        $coupon = Coupon::findOrFail($id);
+        $coupon->delete();
+        return $this->success(null, 'Coupon deleted');
+    }
+    // ==================== REVIEWS ====================   
+    public function getReviews(Request $request): JsonResponse
+    {
+        $query = Review::with(['user', 'product']);
+        if ($request->has('rating')) {
+            $query->where('rating', $request->rating);
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function deleteReview(int $id): JsonResponse
+    {
+        $review = Review::findOrFail($id);
+        $review->delete();
+        return $this->success(null, 'Review deleted');
+    }
+    // ==================== FAQs ====================    
+    public function getFAQs(): JsonResponse
+    {
+        $faqs = Faq::orderBy('sort_order')->latest()->get();
+        return $this->success($faqs);
+    }
+    public function createFAQ(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'question' => 'required|string',
+            'answer' => 'required|string',
+            'category' => 'nullable|string',
+            'sort_order' => 'nullable|integer',
+        ]);
+        $faq = Faq::create($validated);
+        return $this->success($faq, 'FAQ created', 201);
+    }
+    public function updateFAQ(Request $request, int $id): JsonResponse
+    {
+        $faq = Faq::findOrFail($id);
+        $validated = $request->validate([
+            'question' => 'sometimes|string',
+            'answer' => 'sometimes|string',
+            'category' => 'nullable|string',
+            'sort_order' => 'nullable|integer',
+        ]);
+        $faq->update($validated);
+        return $this->success($faq->fresh(), 'FAQ updated');
+    }
+    public function deleteFAQ(int $id): JsonResponse
+    {
+        $faq = Faq::findOrFail($id);
+        $faq->delete();
+        return $this->success(null, 'FAQ deleted');
+    }
+    // ==================== BANNERS ====================  
+    public function getBanners(): JsonResponse
+    {
+        $banners = Banner::orderBy('sort_order')->latest()->get();
+        return $this->success($banners);
+    }
+    public function createBanner(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'subtitle' => 'nullable|string',
+            'link' => 'nullable|string',
+            'position' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        if ($request->hasFile('image')) {
+            $validated['image'] = $request->file('image')->store('banners', 'public');
+        }
+        $banner = Banner::create($validated);
+        return $this->success($banner, 'Banner created', 201);
+    }
+    public function updateBanner(Request $request, int $id): JsonResponse
+    {
+        $banner = Banner::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|string|max:255',
+            'subtitle' => 'nullable|string',
+            'link' => 'nullable|string',
+            'position' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        if ($request->hasFile('image')) {
+            if ($banner->image) {
+                Storage::disk('public')->delete($banner->image);
+            }
+            $validated['image'] = $request->file('image')->store('banners', 'public');
+        }
+        $banner->update($validated);
+        return $this->success($banner->fresh(), 'Banner updated');
+    }
+    public function deleteBanner(int $id): JsonResponse
+    {
+        $banner = Banner::findOrFail($id);
+        if ($banner->image) {
+            Storage::disk('public')->delete($banner->image);
+        }
+        $banner->delete();
+        return $this->success(null, 'Banner deleted');
+    }
+    // ==================== SLIDERS (ADMIN) ====================  
+    public function getSliders(): JsonResponse
+    {
+        $sliders = Slider::orderBy('sort_order')->latest()->get();
+        return $this->success($sliders);
+    }
+    public function createSlider(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'subtitle' => 'nullable|string',
+            'description' => 'nullable|string',
+            'link' => 'nullable|string',
+            'button_text' => 'nullable|string',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        if ($request->hasFile('image')) {
+            $validated['image'] = $request->file('image')->store('sliders', 'public');
+        }
+        $slider = Slider::create($validated);
+        return $this->success($slider, 'Slider created', 201);
+    }
+    public function updateSlider(Request $request, int $id): JsonResponse
+    {
+        $slider = Slider::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|string|max:255',
+            'subtitle' => 'nullable|string',
+            'description' => 'nullable|string',
+            'link' => 'nullable|string',
+            'button_text' => 'nullable|string',
+            'image' => 'nullable|image|mimes:jpeg,png,jpg,webp,gif,svg|max:4096',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        // Convert string booleans from FormData       
+        if (isset($validated['is_active'])) {
+            $validated['is_active'] = filter_var($validated['is_active'], FILTER_VALIDATE_BOOLEAN);
+        }
+        if ($request->hasFile('image')) {
+            if ($slider->image) {
+                Storage::disk('public')->delete($slider->image);
+            }
+            $validated['image'] = $request->file('image')->store('sliders', 'public');
+        }
+        $slider->update($validated);
+        return $this->success($slider->fresh(), 'Slider updated');
+    }
+    public function deleteSlider(int $id): JsonResponse
+    {
+        $slider = Slider::findOrFail($id);
+        if ($slider->image) {
+            Storage::disk('public')->delete($slider->image);
+        }
+        $slider->delete();
+        return $this->success(null, 'Slider deleted');
+    }
+    // ==================== BLOGS (ADMIN) ====================   
+    public function getAdminBlogs(): JsonResponse
+    {
+        $blogs = Blog::with('author')->latest()->get();
+        return $this->success($blogs);
+    }
+    public function createBlog(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'slug' => 'required|string|unique:blogs,slug',
+            'content' => 'required|string',
+            'excerpt' => 'nullable|string',
+            'category' => 'nullable|string',
+            'tags' => 'nullable|array',
+            'is_published' => 'sometimes|boolean',
+        ]);
+        $validated['is_published'] = $validated['is_published'] ?? false;
+        $validated['author_id'] = auth()->id();
+        if ($request->hasFile('image')) {
+            $validated['image'] = $request->file('image')->store('blogs', 'public');
+        }
+        $blog = Blog::create($validated);
+        return $this->success($blog, 'Blog created', 201);
+    }
+    public function updateBlog(Request $request, int $id): JsonResponse
+    {
+        $blog = Blog::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|string|max:255',
+            'slug' => 'sometimes|string|unique:blogs,slug,' . $id,
+            'content' => 'sometimes|string',
+            'excerpt' => 'nullable|string',
+            'category' => 'nullable|string',
+            'tags' => 'nullable|array',
+            'is_published' => 'sometimes|boolean',
+        ]);
+        if ($request->hasFile('image')) {
+            if ($blog->image) {
+                Storage::disk('public')->delete($blog->image);
+            }
+            $validated['image'] = $request->file('image')->store('blogs', 'public');
+        }
+        $blog->update($validated);
+        return $this->success($blog->fresh()->load('author'), 'Blog updated');
+    }
+    public function deleteBlog(int $id): JsonResponse
+    {
+        $blog = Blog::findOrFail($id);
+        if ($blog->image) {
+            Storage::disk('public')->delete($blog->image);
+        }
+        $blog->delete();
+        return $this->success(null, 'Blog deleted');
+    }
+    // ==================== PAGES (ADMIN) ====================   
+    public function getAdminPages(): JsonResponse
+    {
+        $pages = Page::latest()->get();
+        return $this->success($pages);
+    }
+    public function createPage(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'slug' => 'required|string|unique:pages,slug',
+            'content' => 'required|string',
+            'meta_title' => 'nullable|string',
+            'meta_description' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $page = Page::create($validated);
+        return $this->success($page, 'Page created', 201);
+    }
+    public function updatePage(Request $request, int $id): JsonResponse
+    {
+        $page = Page::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|string|max:255',
+            'slug' => 'sometimes|string|unique:pages,slug,' . $id,
+            'content' => 'sometimes|string',
+            'meta_title' => 'nullable|string',
+            'meta_description' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        $page->update($validated);
+        return $this->success($page->fresh(), 'Page updated');
+    }
+    public function deletePage(int $id): JsonResponse
+    {
+        $page = Page::findOrFail($id);
+        $page->delete();
+        return $this->success(null, 'Page deleted');
+    }
+    // ==================== STAFF ====================    
+    public function getStaff(): JsonResponse
+    {
+        $staff = User::whereIn('role', ['admin', 'staff'])->latest()->get();
+        return $this->success($staff);
+    }
+    // ==================== RETURNS ====================  
+    public function getReturns(): JsonResponse
+    {
+        $query = Order::with(['user', 'items'])->where('status', 'returned');
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    // ==================== POS (POINT OF SALE) ====================  
+    public function posSearchProducts(Request $request): JsonResponse
+    {
+        $query = Product::with(['category', 'brand', 'images'])
+            ->where('is_active', true)
+            ->where('stock_quantity', '>', 0);
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('sku', 'like', "%{$search}%")
+                    ->orWhere('barcode', 'like', "%{$search}%");
+            });
+        }
+        $products = $query->limit(50)->get();
+        return $this->success($products);
+    }
+    public function posCreateOrder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'customer_name' => 'nullable|string|max:255',
+            'customer_phone' => 'nullable|string|max:20',
+            'customer_email' => 'nullable|email',
+            'items' => 'required|array|min:1',
+            'items.*.product_id' => 'required|exists:products,id',
+            'items.*.quantity' => 'required|integer|min:1',
+            'payment_method' => 'required|string|in:cod,bkash,nagad,card,cash',
+            'discount' => 'nullable|numeric|min:0',
+            'shipping_cost' => 'nullable|numeric|min:0',
+            'tax' => 'nullable|numeric|min:0',
+            'notes' => 'nullable|string',
+        ]);
+        // Calculate totals       
+        $subtotal = 0;
+        $orderItems = [];
+        foreach ($validated['items'] as $item) {
+            $product = Product::findOrFail($item['product_id']);
+            if ($product->stock_quantity < $item['quantity']) {
+                return $this->error("Insufficient stock for {$product->name}. Available: {$product->stock_quantity}", 422);
+            }
+            $lineTotal = $product->price * $item['quantity'];
+            $subtotal += $lineTotal;
+            $orderItems[] = [
+                'product_id' => $product->id,
+                'price' => $product->price,
+                'quantity' => $item['quantity'],
+                'total' => $lineTotal,
+            ];
+        }
+        $discount = $validated['discount'] ?? 0;
+        $shippingCost = $validated['shipping_cost'] ?? 0;
+        $tax = $validated['tax'] ?? 0;
+        $total = $subtotal - $discount + $shippingCost + $tax;
+        // Create walk-in customer or use existing      
+        $userId = auth()->id();
+        // Admin creating the POS order       
+        // Generate unique order number       
+        $orderNumber = 'POS-' . strtoupper(uniqid());
+        $order = Order::create([
+            'user_id' => $userId,
+            'order_number' => $orderNumber,
+            'status' => 'confirmed',
+            'subtotal' => $subtotal,
+            'discount' => $discount,
+            'shipping_cost' => $shippingCost,
+            'tax' => $tax,
+            'total' => $total,
+            'payment_method' => $validated['payment_method'],
+            'payment_status' => $validated['payment_method'] === 'cash' ? 'paid' : 'pending',
+            'notes' => ($validated['notes'] ?? '') . " | POS Customer: " . ($validated['customer_name'] ?? 'Walk-in') . " | Phone: " . ($validated['customer_phone'] ?? 'N/A'),
+        ]);
+        // Create order items and decrement stock      
+        foreach ($orderItems as $oi) {
+            $order->items()->create($oi);
+            Product::where('id', $oi['product_id'])->decrement('stock_quantity', $oi['quantity']);
+            Product::where('id', $oi['product_id'])->increment('sales_count', $oi['quantity']);
+        }
+        return $this->success($order->load('items.product'), 'POS order created successfully', 201);
+    }
+    // ==================== DELIVERY BOYS ====================   
+    public function getDeliveryBoys(Request $request): JsonResponse
+    {
+        $query = User::where('role', 'delivery_boy');
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('email', 'like', "%{$search}%")
+                    ->orWhere('phone', 'like', "%{$search}%");
+            });
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function createDeliveryBoy(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'phone' => 'nullable|string|max:20',
+            'password' => 'required|string|min:6',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        $validated['role'] = 'delivery_boy';
+        $validated['password'] = bcrypt($validated['password']);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $deliveryBoy = User::create($validated);
+        return $this->success($deliveryBoy->makeHidden(['password']), 'Delivery boy created', 201);
+    }
+    public function updateDeliveryBoy(Request $request, int $id): JsonResponse
+    {
+        $deliveryBoy = User::where('role', 'delivery_boy')->findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'email' => 'sometimes|email|unique:users,email,' . $id,
+            'phone' => 'nullable|string|max:20',
+            'password' => 'nullable|string|min:6',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        if (isset($validated['password'])) {
+            $validated['password'] = bcrypt($validated['password']);
+        } else {
+            unset($validated['password']);
+        }
+        $deliveryBoy->update($validated);
+        return $this->success($deliveryBoy->makeHidden(['password']), 'Delivery boy updated');
+    }
+    public function deleteDeliveryBoy(int $id): JsonResponse
+    {
+        $deliveryBoy = User::where('role', 'delivery_boy')->findOrFail($id);
+        // Unassign from any pending orders  
+        Order::where('delivery_boy_id', $id)
+            ->whereIn('status', ['confirmed', 'processing'])
+            ->update(['delivery_boy_id' => null, 'assigned_at' => null]);
+        $deliveryBoy->delete();
+        return $this->success(null, 'Delivery boy deleted');
+    }
+    // ==================== ORDER TRACKING ====================  
+    public function getOrderTracking(int $id): JsonResponse
+    {
+        $order = Order::with(['user', 'items.product', 'deliveryBoy', 'shippingAddress'])
+            ->findOrFail($id);
+        // Build timeline        
+        $timeline = [];
+        $timeline[] = [
+            'status' => 'Order Placed',
+            'description' => 'Order was placed successfully',
+            'timestamp' => $order->created_at,
+            'completed' => true,
+        ];
+        if (in_array($order->status, ['confirmed', 'processing', 'shipped', 'delivered'])) {
+            $timeline[] = [
+                'status' => 'Confirmed',
+                'description' => 'Order has been confirmed',
+                'timestamp' => $order->updated_at,
+                'completed' => true,
+            ];
+        }
+        if ($order->assigned_at) {
+            $timeline[] = [
+                'status' => 'Assigned to Delivery',
+                'description' => 'Assigned to ' . ($order->deliveryBoy?->name ?? 'Unknown'),
+                'timestamp' => $order->assigned_at,
+                'completed' => true,
+            ];
+        }
+        if (in_array($order->status, ['processing', 'shipped', 'delivered'])) {
+            $timeline[] = [
+                'status' => 'Processing',
+                'description' => 'Order is being processed',
+                'timestamp' => $order->updated_at,
+                'completed' => true,
+            ];
+        }
+        if ($order->picked_up_at) {
+            $timeline[] = [
+                'status' => 'Picked Up',
+                'description' => 'Package picked up by delivery boy',
+                'timestamp' => $order->picked_up_at,
+                'completed' => true,
+            ];
+        }
+        if (in_array($order->status, ['shipped', 'delivered'])) {
+            $timeline[] = [
+                'status' => 'Shipped',
+                'description' => 'Order has been shipped' . ($order->tracking_number ? " (Track: {$order->tracking_number})" : ''),
+                'timestamp' => $order->shipped_at,
+                'completed' => true,
+            ];
+        }
+        if ($order->status === 'delivered') {
+            $timeline[] = [
+                'status' => 'Delivered',
+                'description' => 'Order has been delivered successfully',
+                'timestamp' => $order->delivered_at,
+                'completed' => true,
+            ];
+        } elseif ($order->status === 'cancelled') {
+            $timeline[] = [
+                'status' => 'Cancelled',
+                'description' => 'Order has been cancelled',
+                'timestamp' => $order->updated_at,
+                'completed' => true,
+            ];
+        } elseif ($order->status === 'returned') {
+            $timeline[] = [
+                'status' => 'Returned',
+                'description' => 'Order has been returned',
+                'timestamp' => $order->updated_at,
+                'completed' => true,
+            ];
+        } else {
+            // Future steps - not yet completed           
+            if ($order->status !== 'shipped') {
+                $timeline[] = [
+                    'status' => 'Out for Delivery',
+                    'description' => 'Waiting for pickup',
+                    'timestamp' => null,
+                    'completed' => false,
+                ];
+            }
+            if ($order->status !== 'delivered') {
+                $timeline[] = [
+                    'status' => 'Delivered',
+                    'description' => 'Awaiting delivery confirmation',
+                    'timestamp' => null,
+                    'completed' => false,
+                ];
+            }
+        }
+        return $this->success([
+            'order' => $order,
+            'timeline' => $timeline,
+        ]);
+    }
+    public function assignDeliveryBoy(Request $request, int $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'delivery_boy_id' => 'required|exists:users,id',
+        ]);
+        $order = Order::findOrFail($id);
+        $deliveryBoy = User::where('id', $validated['delivery_boy_id'])
+            ->where('role', 'delivery_boy')
+            ->firstOrFail();
+        $order->update([
+            'delivery_boy_id' => $deliveryBoy->id,
+            'assigned_at' => now(),
+        ]);
+        return $this->success(
+            $order->fresh()->load(['user', 'deliveryBoy']),
+            'Delivery boy assigned successfully'
+        );
+    }
+    public function updateOrderTracking(Request $request, int $id): JsonResponse
+    {
+        $validated = $request->validate([
+            'status' => 'sometimes|string|in:pending,confirmed,processing,shipped,delivered,cancelled,returned',
+            'tracking_number' => 'nullable|string',
+            'delivery_notes' => 'nullable|string',
+            'picked_up_at' => 'nullable|date',
+        ]);
+        $order = Order::findOrFail($id);
+        if (isset($validated['status'])) {
+            $order->update(['status' => $validated['status']]);
+            if ($validated['status'] === 'shipped' && !$order->shipped_at) {
+                $order->update(['shipped_at' => now()]);
+            }
+            if ($validated['status'] === 'delivered' && !$order->delivered_at) {
+                $order->update(['delivered_at' => now()]);
+            }
+        }
+        if (isset($validated['tracking_number'])) {
+            $order->update(['tracking_number' => $validated['tracking_number']]);
+        }
+        if (isset($validated['delivery_notes'])) {
+            $order->update(['delivery_notes' => $validated['delivery_notes']]);
+        }
+        if (isset($validated['picked_up_at'])) {
+            $order->update(['picked_up_at' => $validated['picked_up_at']]);
+        }
+        return $this->success(
+            $order->fresh()->load(['user', 'items.product', 'deliveryBoy']),
+            'Order tracking updated'
+        );
+    }
+    // ==================== NOTIFICATIONS ====================   
+    public function getNotifications(Request $request): JsonResponse
+    {
+        $query = NotificationModel::with('user:id,name,email,avatar');
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('title', 'like', "%{$search}%")
+                    ->orWhere('message', 'like', "%{$search}%");
+            });
+        }
+        if ($type = $request->type) {
+            $query->where('type', $type);
+        }
+        if ($request->has('is_read')) {
+            $query->where('is_read', $request->boolean('is_read'));
+        }
+        if ($userId = $request->user_id) {
+            $query->where('user_id', $userId);
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function sendNotification(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'user_id' => 'required|exists:users,id',
+            'title' => 'required|string|max:255',
+            'message' => 'required|string|max:1000',
+            'type' => 'sometimes|string|in:info,success,warning,error',
+        ]);
+        $user = \App\Models\User::findOrFail($validated['user_id']);
+        $notification = $user->notifications_model()->create([
+            'title' => $validated['title'],
+            'message' => $validated['message'],
+            'type' => $validated['type'] ?? 'info',
+        ]);
+        return $this->success($notification, 'Notification sent', 201);
+    }
+
+    public function sendBulkNotification(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'user_ids' => 'required|array|min:1',
+            'user_ids.*' => 'exists:users,id',
+            'title' => 'required|string|max:255',
+            'message' => 'required|string|max:1000',
+            'type' => 'sometimes|string|in:info,success,warning,error',
+        ]);
+        $users = \App\Models\User::whereIn('id', $validated['user_ids'])->get();
+        $notifications = [];
+        foreach ($users as $user) {
+            $notifications[] = $user->notifications_model()->create([
+                'title' => $validated['title'],
+                'message' => $validated['message'],
+                'type' => $validated['type'] ?? 'info',
+            ]);
+        }
+        return $this->success($notifications, count($notifications) . ' notifications sent', 201);
+    }
+    public function deleteNotification(int $id): JsonResponse
+    {
+        $notification = NotificationModel::findOrFail($id);
+        $notification->delete();
+        return $this->success(null, 'Notification deleted');
+    }
+    public function notificationStats(): JsonResponse
+    {
+        $total = NotificationModel::count();
+        $unread = NotificationModel::where('is_read', false)->count();
+        $today = NotificationModel::whereDate('created_at', today())->count();
+        return $this->success([
+            'total' => $total,
+            'unread' => $unread,
+            'today' => $today,
+        ]);
+    }
+    // ==================== PAYMENT GATEWAYS ====================   
+    public function getPaymentGateways(): JsonResponse
+    {
+        $gateways = PaymentGateway::orderBy('sort_order')->get();
+        return $this->success($gateways);
+    }
+    public function updatePaymentGateway(Request $request, int $id): JsonResponse
+    {
+        $gateway = PaymentGateway::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'description' => 'nullable|string',
+            'config' => 'nullable|array',
+            'status' => 'sometimes|in:active,inactive,test',
+            'test_mode' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer|min:0',
+        ]);
+        $gateway->update($validated);
+        return $this->success($gateway->fresh(), 'Payment gateway updated');
+    }
+    // ==================== PAYMENT TRANSACTIONS ====================  
+    public function getPaymentTransactions(Request $request): JsonResponse
+    {
+        $query = PaymentTransaction::with('order:id,user_id,total,status');
+        if ($status = $request->status) {
+            $query->where('status', $status);
+        }
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('order_number', 'like', "%{$search}%")
+                    ->orWhere('transaction_id', 'like', "%{$search}%")
+                    ->orWhere('gateway', 'like', "%{$search}%");
+            });
+        }
+        if ($gateway = $request->gateway) {
+            $query->where('gateway', $gateway);
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    // ==================== VENDOR MANAGEMENT ====================   
+    public function getVendors(Request $request): JsonResponse
+    {
+        $query = VendorShop::with(['user:id,name,email,phone,is_active,created_at']);
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('shop_name', 'like', "%{$search}%")
+                    ->orWhere('shop_slug', 'like', "%{$search}%")
+                    ->orWhereHas('user', function ($uq) use ($search) {
+                        $uq->where('name', 'like', "%{$search}%")
+                            ->orWhere('email', 'like', "%{$search}%");
+                    });
+            });
+        }
+        if ($status = $request->status) {
+            if ($status === 'active') {
+                $query->where('is_active', true);
+            } elseif ($status === 'inactive') {
+                $query->where('is_active', false);
+            } elseif ($status === 'verified') {
+                $query->where('is_verified', true);
+            } elseif ($status === 'unverified') {
+                $query->where('is_verified', false);
+            }
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function getVendor(int $id): JsonResponse
+    {
+        $vendor = VendorShop::with([
+            'user:id,name,email,phone,is_active,created_at',
+            'products:id,name,slug,price,stock_quantity,is_active,vendor_id',
+            'payouts:id,vendor_shop_id,amount,status,created_at',
+        ])->findOrFail($id);
+        return $this->success($vendor);
+    }
+    public function updateVendor(Request $request, int $id): JsonResponse
+    {
+        $vendor = VendorShop::findOrFail($id);
+        $validated = $request->validate([
+            'shop_name' => 'sometimes|string|max:255',
+            'shop_slug' => 'sometimes|string|max:255|unique:vendor_shops,shop_slug,' . $id,
+            'shop_description' => 'nullable|string',
+            'contact_email' => 'nullable|email|max:255',
+            'contact_phone' => 'nullable|string|max:20',
+            'business_address' => 'nullable|string',
+            'city' => 'nullable|string|max:100',
+            'country' => 'nullable|string|max:100',
+            'postal_code' => 'nullable|string|max:20',
+            'tax_id' => 'nullable|string|max:50',
+            'commission_rate' => 'sometimes|numeric|min:0|max:100',
+            'is_active' => 'sometimes|boolean',
+            'is_verified' => 'sometimes|boolean',
+        ]);
+        $vendor->update($validated);
+        return $this->success($vendor->fresh(['user']), 'Vendor updated');
+    }
+    public function deleteVendor(int $id): JsonResponse
+    {
+        $vendor = VendorShop::findOrFail($id);
+        $vendor->delete();
+        return $this->success(null, 'Vendor deleted');
+    }
+    public function vendorStats(): JsonResponse
+    {
+        $total = VendorShop::count();
+        $active = VendorShop::where('is_active', true)->count();
+        $verified = VendorShop::where('is_verified', true)->count();
+        $pendingVerification = VendorShop::where('is_verified', false)->count();
+        $totalRevenue = VendorShop::sum('total_revenue');
+        $totalEarnings = VendorShop::sum('total_earnings');
+        $pendingPayout = VendorShop::sum('pending_payout');
+        return $this->success([
+            'total' => $total,
+            'active' => $active,
+            'verified' => $verified,
+            'pending_verification' => $pendingVerification,
+            'total_revenue' => (float) $totalRevenue,
+            'total_earnings' => (float) $totalEarnings,
+            'pending_payout' => (float) $pendingPayout,
+        ]);
+    }
+    // ==================== DELIVERY PARTNERS ====================   
+    public function getDeliveryPartners(Request $request): JsonResponse
+    {
+        $query = DeliveryPartner::query();
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                    ->orWhere('slug', 'like', "%{$search}%");
+            });
+        }
+        if ($status = $request->status) {
+            $query->where('status', $status);
+        }
+        $result = $this->paginated($query->withCount('bookings')->latest());
+        return $this->success($result);
+    }
+    public function getDeliveryPartner(int $id): JsonResponse
+    {
+        $partner = DeliveryPartner::withCount('bookings')->findOrFail($id);
+        return $this->success($partner);
+    }
+    public function createDeliveryPartner(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'slug' => 'required|string|unique:delivery_partners,slug',
+            'description' => 'nullable|string',
+            'logo' => 'nullable|string|max:500',
+            'config' => 'nullable|array',
+            'status' => 'sometimes|in:active,inactive',
+            'is_sandbox' => 'sometimes|boolean',
+            'supported_areas' => 'nullable|array',
+            'supported_service_types' => 'nullable|array',
+            'cod_enabled' => 'sometimes|boolean',
+
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $validated['sort_order'] = $validated['sort_order'] ?? 0;
+        $partner = DeliveryPartner::create($validated);
+        return $this->success($partner, 'Delivery partner created', 201);
+    }
+
+    public function updateDeliveryPartner(Request $request, int $id): JsonResponse
+    {
+        $partner = DeliveryPartner::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'slug' => 'sometimes|string|unique:delivery_partners,slug,' . $id,
+            'description' => 'nullable|string',
+            'logo' => 'nullable|string|max:500',
+            'config' => 'nullable|array',
+            'status' => 'sometimes|in:active,inactive',
+            'is_sandbox' => 'sometimes|boolean',
+            'supported_areas' => 'nullable|array',
+            'supported_service_types' => 'nullable|array',
+            'cod_enabled' => 'sometimes|boolean',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $partner->update($validated);
+        return $this->success($partner, 'Delivery partner updated');
+    }
+
+    public function deleteDeliveryPartner(int $id): JsonResponse
+    {
+        $partner = DeliveryPartner::findOrFail($id);
+        $partner->delete();
+        return $this->success(null, 'Delivery partner deleted');
+    }
+
+
+    public function getDeliveryBookings(Request $request): JsonResponse
+    {
+        $query = DeliveryBooking::with('order');
+        if ($status = $request->status) {
+            $query->where('status', $status);
+        }
+        if ($partner = $request->partner) {
+            $query->where('partner', $partner);
+        }
+        if ($search = $request->search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('order_number', 'like', "%{$search}%")
+                    ->orWhere('tracking_id', 'like', "%{$search}%")
+                    ->orWhere('recipient_name', 'like', "%{$search}%");
+            });
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+
+
+    public function bookDelivery(Request $request, int $orderId): JsonResponse
+    {
+        $order = Order::with('shippingAddress')->findOrFail($orderId);
+        $validated = $request->validate([
+            'partner' => 'required|string|exists:delivery_partners,slug',
+            'pickup_address' => 'required|string',
+            'service_type' => 'nullable|string',
+        ]);
+        $partner = DeliveryPartner::where('slug', $validated['partner'])->firstOrFail();
+        $shippingAddress = $order->shippingAddress;
+        $deliveryAddress = $shippingAddress
+            ? $shippingAddress->address_line_1 . ', ' . ($shippingAddress->city ?? '') . ', ' . ($shippingAddress->state ?? '') . ' ' . ($shippingAddress->postal_code ?? '')
+            : 'N/A';
+        $booking = DeliveryBooking::create([
+            'order_id' => $order->id,
+            'order_number' => $order->order_number,
+            'partner' => $partner->slug,
+            'tracking_id' => strtoupper(uniqid($partner->slug . '-')),
+            'status' => 'pending',
+            'pickup_address' => $validated['pickup_address'],
+            'delivery_address' => $deliveryAddress,
+            'recipient_name' => $order->user->name ?? 'N/A',
+            'recipient_phone' => $order->shippingAddress?->phone ?? '',
+            'cod_amount' => $order->payment_method === 'cod' ? $order->total_amount : null,
+            'shipping_fee' => $order->shipping_cost ?? 0,
+            'estimated_delivery' => now()->addDays(3)->toDateString(),
+            'booked_at' => now(),
+        ]);
+        // Update order with tracking info       
+        $order->update([
+            'tracking_number' => $booking->tracking_id,
+        ]);
+        return $this->success($booking->load('order'), 'Delivery booked successfully', 201);
+    }
+    public function updateDeliveryBooking(Request $request, int $id): JsonResponse
+    {
+        $booking = DeliveryBooking::findOrFail($id);
+        $validated = $request->validate([
+            'status' => 'sometimes|in:pending,picked,in_transit,delivered,returned,failed',
+            'tracking_id' => 'sometimes|string',
+            'picked_at' => 'nullable|date',
+            'delivered_at' => 'nullable|date',
+        ]);
+        $booking->update($validated);
+        // If delivered, update order status       
+        if (isset($validated['status']) && $validated['status'] === 'delivered') {
+            $order = Order::find($booking->order_id);
+            if ($order && !in_array($order->status, ['delivered', 'cancelled'])) {
+                $order->update([
+
+                    'status' => 'delivered',
+                    'delivered_at' => $validated['delivered_at'] ?? now(),
+                ]);
+            }
+        }
+        return $this->success($booking->load('order'), 'Booking updated');
+    }
+    // ==================== SHIPPING ZONES & METHODS ====================   
+    public function getShippingZones(Request $request): JsonResponse
+    {
+        $query = ShippingZone::with('methods');
+        if ($search = $request->search) {
+            $query->where('name', 'like', "%{$search}%");
+        }
+        if ($request->has('is_active')) {
+            $query->where('is_active', $request->boolean('is_active'));
+        }
+        $result = $this->paginated($query->latest());
+        return $this->success($result);
+    }
+    public function getShippingZone(int $id): JsonResponse
+    {
+        $zone = ShippingZone::with('methods')->findOrFail($id);
+        return $this->success($zone);
+    }
+
+    public function createShippingZone(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'countries' => 'nullable|array',
+            'states' => 'nullable|array',
+            'cities' => 'nullable|array',
+            'zip_codes' => 'nullable|array',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+            'methods' => 'nullable|array',
+            'methods.*.name' => 'required_with:methods|string|max:255',
+            'methods.*.description' => 'nullable|string',
+            'methods.*.rate_type' => 'required_with:methods|in:flat,weight_based,price_based,free',
+            'methods.*.base_rate' => 'required_with:methods|numeric|min:0',
+            'methods.*.per_kg_rate' => 'nullable|numeric|min:0',
+            'methods.*.min_order_amount' => 'nullable|numeric|min:0',
+            'methods.*.max_order_amount' => 'nullable|numeric|min:0',
+            'methods.*.min_weight' => 'nullable|numeric|min:0',
+            'methods.*.max_weight' => 'nullable|numeric|min:0',
+
+            'methods.*.estimated_days' => 'nullable|string',
+            'methods.*.is_active' => 'sometimes|boolean',
+            'methods.*.sort_order' => 'sometimes|integer',
+        ]);
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $validated['sort_order'] = $validated['sort_order'] ?? 0;
+        $methodsData = $validated['methods'] ?? [];
+        unset($validated['methods']);
+        $zone = ShippingZone::create($validated);
+        foreach ($methodsData as $methodData) {
+            $methodData['zone_id'] = $zone->id;
+            $methodData['is_active'] = $methodData['is_active'] ?? true;
+            $methodData['sort_order'] = $methodData['sort_order'] ?? 0;
+            ShippingMethod::create($methodData);
+        }
+        return $this->success($zone->load('methods'), 'Shipping zone created', 201);
+    }
+    public function updateShippingZone(Request $request, int $id): JsonResponse
+    {
+        $zone = ShippingZone::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'description' => 'nullable|string',
+            'countries' => 'nullable|array',
+            'states' => 'nullable|array',
+            'cities' => 'nullable|array',
+            'zip_codes' => 'nullable|array',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $zone->update($validated);
+        return $this->success($zone->load('methods'), 'Shipping zone updated');
+    }
+    public function deleteShippingZone(int $id): JsonResponse
+    {
+        $zone = ShippingZone::findOrFail($id);
+        $zone->methods()->delete();
+        $zone->delete();
+        return $this->success(null, 'Shipping zone deleted');
+    }
+    public function createShippingMethod(Request $request, int $zoneId): JsonResponse
+    {
+        ShippingZone::findOrFail($zoneId);
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'rate_type' => 'required|in:flat,weight_based,price_based,free',
+            'base_rate' => 'required|numeric|min:0',
+            'per_kg_rate' => 'nullable|numeric|min:0',
+            'min_order_amount' => 'nullable|numeric|min:0',
+            'max_order_amount' => 'nullable|numeric|min:0',
+            'min_weight' => 'nullable|numeric|min:0',
+            'max_weight' => 'nullable|numeric|min:0',
+            'estimated_days' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $validated['zone_id'] = $zoneId;
+        $validated['is_active'] = $validated['is_active'] ?? true;
+        $validated['sort_order'] = $validated['sort_order'] ?? 0;
+        $method = ShippingMethod::create($validated);
+        return $this->success($method, 'Shipping method created', 201);
+    }
+    public function updateShippingMethod(Request $request, int $zoneId, int $methodId): JsonResponse
+    {
+        $method = ShippingMethod::where('zone_id', $zoneId)->findOrFail($methodId);
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'description' => 'nullable|string',
+            'rate_type' => 'sometimes|in:flat,weight_based,price_based,free',
+            'base_rate' => 'sometimes|numeric|min:0',
+            'per_kg_rate' => 'nullable|numeric|min:0',
+            'min_order_amount' => 'nullable|numeric|min:0',
+            'max_order_amount' => 'nullable|numeric|min:0',
+            'min_weight' => 'nullable|numeric|min:0',
+            'max_weight' => 'nullable|numeric|min:0',
+            'estimated_days' => 'nullable|string',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+        ]);
+        $method->update($validated);
+        return $this->success($method, 'Shipping method updated');
+    }
+    public function deleteShippingMethod(int $zoneId, int $methodId): JsonResponse
+    {
+        $method = ShippingMethod::where('zone_id', $zoneId)->findOrFail($methodId);
+        $method->delete();
+        return $this->success(null, 'Shipping method deleted');
+    }
+    // ==================== FLASH SALES ====================   
+    public function getFlashSales(): JsonResponse
+    {
+        $sales = FlashSale::withCount('products')->orderBy('sort_order')->get();
+        return $this->success($sales);
+    }
+    public function createFlashSale(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'discount_percentage' => 'required|numeric|min:0|max:100',
+            'min_purchase' => 'nullable|numeric|min:0',
+            'max_discount' => 'nullable|numeric|min:0',
+            'start_date' => 'required|date',
+            'end_date' => 'required|date|after_or_equal:start_date',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+            'product_ids' => 'sometimes|array',
+            'product_ids.*' => 'exists:products,id',
+            'flash_prices' => 'sometimes|array',
+        ]);
+        $productIds = $validated['product_ids'] ?? [];
+        $flashPrices = $validated['flash_prices'] ?? [];
+        unset($validated['product_ids'], $validated['flash_prices']);
+        if (isset($validated['is_active'])) {
+            $validated['is_active'] = filter_var($validated['is_active'], FILTER_VALIDATE_BOOLEAN);
+        }
+        $sale = FlashSale::create($validated);
+        foreach ($productIds as $index => $productId) {
+            $sale->products()->attach($productId, [
+                'flash_price' => $flashPrices[$index] ?? null,
+            ]);
+        }
+        return $this->success($sale->loadCount('products'), 'Flash sale created');
+    }
+    public function updateFlashSale(Request $request, int $id): JsonResponse
+    {
+        $sale = FlashSale::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|required|string|max:255',
+            'description' => 'nullable|string',
+            'discount_percentage' => 'sometimes|required|numeric|min:0|max:100',
+            'min_purchase' => 'nullable|numeric|min:0',
+            'max_discount' => 'nullable|numeric|min:0',
+            'start_date' => 'sometimes|required|date',
+            'end_date' => 'sometimes|required|date|after_or_equal:start_date',
+            'is_active' => 'sometimes|boolean',
+            'sort_order' => 'sometimes|integer',
+            'product_ids' => 'sometimes|array',
+            'product_ids.*' => 'exists:products,id',
+            'flash_prices' => 'sometimes|array',
+        ]);
+        if (isset($validated['is_active'])) {
+            $validated['is_active'] = filter_var($validated['is_active'], FILTER_VALIDATE_BOOLEAN);
+        }
+        if (array_key_exists('product_ids', $validated)) {
+            $productIds = $validated['product_ids'] ?? [];
+            $flashPrices = $validated['flash_prices'] ?? [];
+            unset($validated['product_ids'], $validated['flash_prices']);
+            $sale->products()->detach();
+            foreach ($productIds as $index => $productId) {
+                $sale->products()->attach($productId, [
+                    'flash_price' => $flashPrices[$index] ?? null,
+                ]);
+            }
+        } else {
+            unset($validated['product_ids'], $validated['flash_prices']);
+        }
+        $sale->update($validated);
+        return $this->success($sale->loadCount('products'), 'Flash sale updated');
+    }
+
+    public function deleteFlashSale(int $id): JsonResponse
+    {
+        $sale = FlashSale::findOrFail($id);
+        $sale->products()->detach();
+        $sale->delete();
+        return $this->success(null, 'Flash sale deleted');
+    }
+    // ==================== CAMPAIGNS ====================    
+    public function getCampaigns(): JsonResponse
+    {
+        $campaigns = Campaign::orderByDesc('created_at')->get();
+        return $this->success($campaigns);
+    }
+    public function createCampaign(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => 'required|string|max:255',
+            'description' => 'nullable|string',
+            'type' => 'sometimes|in:email,sms,social,promotion,banner',
+            'status' => 'sometimes|in:draft,scheduled,active,paused,completed,cancelled',
+            'coupon_code' => 'nullable|string|max:50',
+            'discount_percentage' => 'nullable|numeric|min:0|max:100',
+            'budget' => 'nullable|numeric|min:0',
+            'target_audience' => 'sometimes|integer|min:0',
+            'start_date' => 'nullable|date',
+            'end_date' => 'nullable|date|after_or_equal:start_date',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        if (isset($validated['is_active'])) {
+            $validated['is_active'] = filter_var($validated['is_active'], FILTER_VALIDATE_BOOLEAN);
+        }
+        $campaign = Campaign::create($validated);
+        if ($request->hasFile('image')) {
+            $campaign->update(['image' => $request->file('image')->store('campaigns', 'public')]);
+        }
+        return $this->success($campaign, 'Campaign created');
+    }
+    public function updateCampaign(Request $request, int $id): JsonResponse
+    {
+        $campaign = Campaign::findOrFail($id);
+        $validated = $request->validate([
+            'title' => 'sometimes|required|string|max:255',
+            'description' => 'nullable|string',
+            'type' => 'sometimes|in:email,sms,social,promotion,banner',
+            'status' => 'sometimes|in:draft,scheduled,active,paused,completed,cancelled',
+            'coupon_code' => 'nullable|string|max:50',
+            'discount_percentage' => 'nullable|numeric|min:0|max:100',
+            'budget' => 'nullable|numeric|min:0',
+            'target_audience' => 'sometimes|integer|min:0',
+            'start_date' => 'nullable|date',
+            'end_date' => 'nullable|date|after_or_equal:start_date',
+            'is_active' => 'sometimes|boolean',
+        ]);
+        if (isset($validated['is_active'])) {
+            $validated['is_active'] = filter_var($validated['is_active'], FILTER_VALIDATE_BOOLEAN);
+        }
+        $campaign->update($validated);
+        if ($request->hasFile('image')) {
+            $campaign->update(['image' => $request->file('image')->store('campaigns', 'public')]);
+        }
+        return $this->success($campaign, 'Campaign updated');
+    }
+    public function deleteCampaign(int $id): JsonResponse
+    {
+        Campaign::findOrFail($id)->delete();
+        return $this->success(null, 'Campaign deleted');
+    }
+    // ==================== SUBSCRIBERS ====================   
+    public function getSubscribers(Request $request): JsonResponse
+    {
+        $query = Subscriber::with('user');
+        if ($search = $request->input('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('email', 'like', "%{$search}%")
+                    ->orWhere('name', 'like', "%{$search}%");
+            });
+        }
+        if ($status = $request->input('status')) {
+            $query->where('status', $status);
+        }
+        $subscribers = $query->orderByDesc('subscribed_at');
+        return $this->paginated($subscribers);
+    }
+    public function getSubscriberStats(): JsonResponse
+    {
+        $total = Subscriber::count();
+        $active = Subscriber::where('status', 'active')->count();
+        $unsubscribed = Subscriber::where('status', 'unsubscribed')->count();
+        $bounced = Subscriber::where('status', 'bounced')->count();
+        $recent = Subscriber::where('subscribed_at', '>=', now()->subDays(30))->count();
+        return $this->success(compact('total', 'active', 'unsubscribed', 'bounced', 'recent'));
+    }
+    public function updateSubscriber(Request $request, int $id): JsonResponse
+    {
+        $subscriber = Subscriber::findOrFail($id);
+        $validated = $request->validate([
+            'name' => 'nullable|string|max:255',
+            'status' => 'sometimes|in:active,unsubscribed,bounced',
+        ]);
+        $subscriber->update($validated);
+        return $this->success($subscriber, 'Subscriber updated');
+    }
+    public function deleteSubscriber(int $id): JsonResponse
+    {
+        Subscriber::findOrFail($id)->delete();
+        return $this->success(null, 'Subscriber deleted');
+    }
+    public function exportSubscribers(): JsonResponse
+    {
+        $subscribers = Subscriber::where('status', 'active')->select('email', 'name', 'source', 'subscribed_at')->get();
+        return $this->success($subscribers);
+    }
+}
+

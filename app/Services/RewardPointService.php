@@ -257,7 +257,7 @@ class RewardPointService
     /**
      * Get all reward points with filters for admin.
      */
-    public function getAllRewardPoints(array $filters = [], int $perPage = 15): \Illuminate\Contracts\Pagination\PaginationResult
+    public function getAllRewardPoints(array $filters = [], int $perPage = 15): \Illuminate\Pagination\LengthAwarePaginator
     {
         $query = RewardPoint::query();
 

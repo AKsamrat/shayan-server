@@ -5,10 +5,12 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\User;
+use App\Services\RewardPointService;
 use App\Traits\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 
 class DeliveryBoyController extends Controller
 {
@@ -134,16 +136,29 @@ class DeliveryBoyController extends Controller
 
         if ($validated['status'] === 'shipped') {
             $updateData['picked_up_at'] = now();
-            if (!$order->shipped_at) {
+            if (!$order->shipped_at && Schema::hasColumn('orders', 'shipped_at')) {
                 $updateData['shipped_at'] = now();
             }
         }
 
-        if ($validated['status'] === 'delivered') {
+        if ($validated['status'] === 'delivered' && Schema::hasColumn('orders', 'delivered_at')) {
             $updateData['delivered_at'] = now();
         }
 
+        $oldStatus = $order->status;
+        $oldPaymentStatus = $order->payment_status;
         $order->update($updateData);
+
+        // Award reward points when order is delivered and payment is successful
+        $wasAlreadyDeliveredAndPaid = ($oldStatus === 'delivered' && $oldPaymentStatus === 'paid');
+        $isNowDeliveredAndPaid = ($order->status === 'delivered' && $order->payment_status === 'paid');
+        
+        if ($isNowDeliveredAndPaid && !$wasAlreadyDeliveredAndPaid) {
+            $service = app(\App\Services\RewardPointService::class);
+            if ($order->user) {
+                $service->awardPoints($order->user, $order);
+            }
+        }
 
         return $this->success(
             $order->fresh()->load(['user', 'items.product']),

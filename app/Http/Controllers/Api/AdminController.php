@@ -39,6 +39,7 @@ use App\Services\NotificationService;
 use App\Services\RewardPointService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
 
@@ -456,6 +457,7 @@ class AdminController extends Controller
     {
         $validated = $request->validate([
             'status' => 'required|string|in:pending,confirmed,processing,shipped,delivered,cancelled,returned,return_requested,refunded',
+            'payment_status' => 'sometimes|string|in:pending,paid,failed,refunded',
         ]);
 
         $order = Order::findOrFail($id);
@@ -463,27 +465,43 @@ class AdminController extends Controller
 
         $updateData = ['status' => $validated['status']];
 
-        if ($validated['status'] === 'shipped') {
+        // Update payment status if provided
+        if (isset($validated['payment_status'])) {
+            $updateData['payment_status'] = $validated['payment_status'];
+        }
+
+        // Only update timestamp columns that exist in the database
+        // Note: shipped_at, delivered_at columns need to be added via migration
+        if ($validated['status'] === 'shipped' && Schema::hasColumn('orders', 'shipped_at')) {
             $updateData['shipped_at'] = now();
         }
 
-        if ($validated['status'] === 'delivered') {
+        if ($validated['status'] === 'delivered' && Schema::hasColumn('orders', 'delivered_at')) {
             $updateData['delivered_at'] = now();
         }
 
-        if ($validated['status'] === 'return_requested') {
+        if ($validated['status'] === 'return_requested' && Schema::hasColumn('orders', 'return_requested_at')) {
             $updateData['return_requested_at'] = now();
         }
 
         if ($validated['status'] === 'refunded') {
             $updateData['payment_status'] = 'refunded';
-            $updateData['refunded_at'] = now();
+            if (Schema::hasColumn('orders', 'refunded_at')) {
+                $updateData['refunded_at'] = now();
+            }
         }
 
+        $oldPaymentStatus = $order->payment_status;
         $order->update($updateData);
 
         // Award reward points when order is delivered and payment is successful
-        if ($validated['status'] === 'delivered' && $order->payment_status === 'paid' && $oldStatus !== 'delivered') {
+        // This should trigger if:
+        // - Order just became 'delivered' AND payment is/was 'paid'
+        // - Payment just became 'paid' AND order is already 'delivered'
+        $wasAlreadyDeliveredAndPaid = ($oldStatus === 'delivered' && $oldPaymentStatus === 'paid');
+        $isNowDeliveredAndPaid = ($order->status === 'delivered' && $order->payment_status === 'paid');
+        
+        if ($isNowDeliveredAndPaid && !$wasAlreadyDeliveredAndPaid) {
             $this->awardOrderPoints($order);
         }
 
@@ -1690,10 +1708,10 @@ class AdminController extends Controller
 
         if (isset($validated['status'])) {
             $order->update(['status' => $validated['status']]);
-            if ($validated['status'] === 'shipped' && !$order->shipped_at) {
+            if ($validated['status'] === 'shipped' && !$order->shipped_at && Schema::hasColumn('orders', 'shipped_at')) {
                 $order->update(['shipped_at' => now()]);
             }
-            if ($validated['status'] === 'delivered' && !$order->delivered_at) {
+            if ($validated['status'] === 'delivered' && !$order->delivered_at && Schema::hasColumn('orders', 'delivered_at')) {
                 $order->update(['delivered_at' => now()]);
             }
         }
@@ -2166,10 +2184,11 @@ class AdminController extends Controller
         if (isset($validated['status']) && $validated['status'] === 'delivered') {
             $order = Order::find($booking->order_id);
             if ($order && !in_array($order->status, ['delivered', 'cancelled'])) {
-                $order->update([
-                    'status' => 'delivered',
-                    'delivered_at' => $validated['delivered_at'] ?? now(),
-                ]);
+                $updateData = ['status' => 'delivered'];
+                if (Schema::hasColumn('orders', 'delivered_at')) {
+                    $updateData['delivered_at'] = $validated['delivered_at'] ?? now();
+                }
+                $order->update($updateData);
             }
         }
 

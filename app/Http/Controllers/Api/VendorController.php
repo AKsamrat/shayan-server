@@ -14,8 +14,11 @@ use App\Models\VendorShop;
 use App\Models\VendorPayout;
 use App\Traits\ApiResponse;
 use App\Models\Notification as NotificationModel;
+use App\Services\NotificationService;
+use App\Services\RewardPointService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
@@ -568,14 +571,27 @@ class VendorController extends Controller
         }
 
         $oldStatus = $order->status;
+        $oldPaymentStatus = $order->payment_status;
+        
         $order->update(['status' => $validated['status']]);
 
         // Set timestamps based on status
         match ($validated['status']) {
-            'shipped' => $order->update(['shipped_at' => now()]),
-            'delivered' => $order->update(['delivered_at' => now()]),
+            'shipped' => Schema::hasColumn('orders', 'shipped_at') ? $order->update(['shipped_at' => now()]) : null,
+            'delivered' => Schema::hasColumn('orders', 'delivered_at') ? $order->update(['delivered_at' => now()]) : null,
             default => null,
         };
+
+        // Award reward points when order is delivered and payment is successful
+        $wasAlreadyDeliveredAndPaid = ($oldStatus === 'delivered' && $oldPaymentStatus === 'paid');
+        $isNowDeliveredAndPaid = ($order->status === 'delivered' && $order->payment_status === 'paid');
+        
+        if ($isNowDeliveredAndPaid && !$wasAlreadyDeliveredAndPaid) {
+            $service = app(\App\Services\RewardPointService::class);
+            if ($order->user) {
+                $service->awardPoints($order->user, $order);
+            }
+        }
 
         // Send status change notification
         app(NotificationService::class)->orderStatusChanged($order->fresh(), $oldStatus);

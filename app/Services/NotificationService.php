@@ -98,6 +98,36 @@ class NotificationService
         $this->sendSms($user, $type, $data);
     }
 
+    // ==================== REWARD POINTS NOTIFICATIONS ====================
+
+    /**
+     * Notify user when they earn reward points.
+     */
+    public function pointsEarned(User $user, int $points, string $description): void
+    {
+        $this->notify(
+            $user,
+            'points_earned',
+            'Points Earned!',
+            "You earned {$points} reward points. {$description}",
+            ['points' => $points, 'description' => $description]
+        );
+    }
+
+    /**
+     * Notify user when they redeem points.
+     */
+    public function pointsRedeemed(User $user, int $points, float $discount): void
+    {
+        $this->notify(
+            $user,
+            'points_redeemed',
+            'Points Redeemed',
+            "You redeemed {$points} points for a discount of  Brennan  {$discount}",
+            ['points' => $points, 'discount' => $discount]
+        );
+    }
+
     // ==================== ORDER NOTIFICATIONS ====================
 
     /**

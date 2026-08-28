@@ -139,6 +139,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/customer/support', [CustomerController::class, 'supportTickets']);
     Route::post('/customer/support', [CustomerController::class, 'createSupportTicket']);
     Route::post('/customer/support/{id}/reply', [CustomerController::class, 'replyToTicket']);
+    Route::post('/customer/rewards/redeem', [CustomerController::class, 'redeemPoints']);
+    Route::post('/customer/rewards/check', [CustomerController::class, 'checkRedemption']);
 
     // Admin Routes
     Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin'])->group(function () {
@@ -361,6 +363,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/support-tickets/{id}/reply', [AdminController::class, 'replyToSupportTicket']);
         Route::put('/support-tickets/{id}/status', [AdminController::class, 'updateSupportTicketStatus']);
         Route::delete('/support-tickets/{id}', [AdminController::class, 'deleteSupportTicket']);
+
+        // Reward Points
+        Route::get('/reward-points', [AdminController::class, 'getRewardPoints']);
+        Route::get('/reward-points/stats', [AdminController::class, 'getRewardPointStats']);
+        Route::get('/reward-points/settings', [AdminController::class, 'getRewardPointSettings']);
+        Route::put('/reward-points/settings', [AdminController::class, 'updateRewardPointSettings']);
+        Route::post('/reward-points/adjust', [AdminController::class, 'adjustUserPoints']);
+        Route::post('/reward-points/expire-old', [AdminController::class, 'expireOldPoints']);
     });
 
     // ==================== VENDOR ROUTES ====================

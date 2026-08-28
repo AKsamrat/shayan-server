@@ -100,6 +100,47 @@ class CustomerController extends Controller
         ]);
     }
 
+    public function redeemPoints(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'points' => 'required|integer|min:1',
+        ]);
+
+        $user = $request->user();
+        $service = app(RewardPointService::class);
+
+        try {
+            $rewardPoint = $service->redeemPoints(
+                $user,
+                $validated['points'],
+                "Redeemed {$validated['points']} points for discount"
+            );
+
+            return $this->success([
+                'reward_point' => $rewardPoint,
+                'discount_amount' => $service->getDiscountAmount($validated['points']),
+                'new_balance' => $service->getUserBalance($user),
+            ], 'Points redeemed successfully', 201);
+        } catch (\RuntimeException $e) {
+            return $this->error($e->getMessage(), 400);
+        }
+    }
+
+    public function checkRedemption(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'cart_amount' => 'required|numeric|min:0',
+            'points' => 'required|integer|min:0',
+        ]);
+
+        $user = $request->user();
+        $service = app(RewardPointService::class);
+
+        $result = $service->canRedeem($user, $validated['cart_amount'], $validated['points']);
+
+        return $this->success($result);
+    }
+
     public function supportTickets(Request $request): JsonResponse
     {
         $query = SupportTicket::with(['replies', 'replies.user'])

@@ -33,6 +33,7 @@ class User extends Authenticatable
         'sms_order_updates',
         'sms_shipping_updates',
         'sms_promotions',
+        'reward_points_balance',
     ];
 
     protected $hidden = ['password', 'remember_token'];
@@ -55,6 +56,7 @@ class User extends Authenticatable
             'sms_order_updates' => 'boolean',
             'sms_shipping_updates' => 'boolean',
             'sms_promotions' => 'boolean',
+            'reward_points_balance' => 'integer',
         ];
     }
 
@@ -90,6 +92,11 @@ class User extends Authenticatable
     public function wallet()
     {
         return $this->hasOne(Wallet::class);
+    }
+
+    public function rewardPoints()
+    {
+        return $this->hasMany(RewardPoint::class);
     }
 
     public function vendorShop()

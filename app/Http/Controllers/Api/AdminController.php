@@ -33,8 +33,10 @@ use App\Models\Campaign;
 use App\Models\Subscriber;
 use App\Models\SupportTicket;
 use App\Models\TicketReply;
+use App\Models\RewardPoint;
 use App\Services\Courier\CourierFraudChecker;
 use App\Services\NotificationService;
+use App\Services\RewardPointService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -479,6 +481,11 @@ class AdminController extends Controller
         }
 
         $order->update($updateData);
+
+        // Award reward points when order is delivered and payment is successful
+        if ($validated['status'] === 'delivered' && $order->payment_status === 'paid' && $oldStatus !== 'delivered') {
+            $this->awardOrderPoints($order);
+        }
 
         // Send status change notification
         app(\App\Services\NotificationService::class)->orderStatusChanged($order->fresh(), $oldStatus);
@@ -2524,5 +2531,103 @@ class AdminController extends Controller
         ];
 
         return $this->success($stats, 'Support ticket statistics');
+    }
+
+    // ==================== REWARD POINTS ====================
+
+    /**
+     * Award reward points for an order when it's marked as delivered.
+     */
+    private function awardOrderPoints(Order $order): void
+    {
+        if (!$order->user || $order->payment_status !== 'paid') {
+            return;
+        }
+
+        try {
+            $service = app(RewardPointService::class);
+            $service->awardPoints($order->user, $order);
+        } catch (\RuntimeException $e) {
+            // Log but don't fail the order update if points can't be awarded
+            \Log::warning("Failed to award points for order #{$order->order_number}: " . $e->getMessage());
+        }
+    }
+
+    public function getRewardPoints(Request $request): JsonResponse
+    {
+        $service = app(RewardPointService::class);
+        $filters = $request->only(['user_id', 'type', 'search', 'expired']);
+        $perPage = $request->get('per_page', 15);
+
+        $result = $service->getAllRewardPoints($filters, $perPage);
+
+        return $this->success($result);
+    }
+
+    public function getRewardPointStats(): JsonResponse
+    {
+        $service = app(RewardPointService::class);
+        $stats = $service->getStats();
+
+        return $this->success($stats);
+    }
+
+    public function getRewardPointSettings(): JsonResponse
+    {
+        $service = app(RewardPointService::class);
+        $settings = $service->getSettings();
+
+        return $this->success($settings);
+    }
+
+    public function updateRewardPointSettings(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'points_rate' => 'required|integer|min:1',
+            'expiry_days' => 'required|integer|min:0',
+            'min_order' => 'required|numeric|min:0',
+            'max_per_order' => 'required|integer|min:1',
+            'redemption_rate' => 'required|integer|min:1',
+        ]);
+
+        $service = app(RewardPointService::class);
+        $settings = $service->updateSettings($validated);
+
+        return $this->success($settings, 'Reward points settings updated');
+    }
+
+    public function adjustUserPoints(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'user_id' => 'required|exists:users,id',
+            'points' => 'required|integer',
+            'type' => 'required|in:earned,redeemed',
+            'description' => 'required|string|max:255',
+        ]);
+
+        $user = User::findOrFail($validated['user_id']);
+        $service = app(RewardPointService::class);
+
+        $rewardPoint = $service->adjustBalance(
+            $user,
+            $validated['points'],
+            $validated['type'],
+            $validated['description']
+        );
+
+        return $this->success($rewardPoint, 'Points adjusted successfully', 201);
+    }
+
+    public function expireOldPoints(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'user_id' => 'nullable|exists:users,id',
+        ]);
+
+        $service = app(RewardPointService::class);
+        $user = $validated['user_id'] ? User::findOrFail($validated['user_id']) : null;
+        $count = $service->expireOldPoints($user);
+
+        return $this->success(['expired_count' => $count], 'Old points expired successfully');
     }
 }

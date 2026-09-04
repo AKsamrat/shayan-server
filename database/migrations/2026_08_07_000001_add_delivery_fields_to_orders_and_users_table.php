@@ -2,16 +2,15 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
     public function up(): void
     {
-        // Add delivery_boy to users role enum
-        Schema::table('users', function (Blueprint $table) {
-            $table->enum('role', ['customer', 'admin', 'vendor', 'super_admin', 'delivery_boy'])->default('customer')->change();
-        });
+        // Add delivery_boy to users role enum using raw SQL (Schema::table doesn't support changing ENUM)
+        DB::statement("ALTER TABLE users MODIFY COLUMN role ENUM('customer', 'admin', 'vendor', 'super_admin', 'delivery_boy') DEFAULT 'customer'");
 
         // Add delivery tracking fields to orders
         Schema::table('orders', function (Blueprint $table) {
@@ -29,8 +28,7 @@ return new class extends Migration
             $table->dropColumn(['delivery_boy_id', 'delivery_notes', 'assigned_at', 'picked_up_at']);
         });
 
-        Schema::table('users', function (Blueprint $table) {
-            $table->enum('role', ['customer', 'admin', 'vendor', 'super_admin'])->default('customer')->change();
-        });
+        // Revert role ENUM using raw SQL
+        DB::statement("ALTER TABLE users MODIFY COLUMN role ENUM('customer', 'admin', 'vendor', 'super_admin') DEFAULT 'customer'");
     }
 };

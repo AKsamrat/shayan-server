@@ -18,6 +18,8 @@ use App\Models\Review;
 use App\Models\OrderItem;
 use App\Models\Attribute;
 use App\Models\AttributeValue;
+use App\Models\AdminAccount;
+use App\Models\AdminAccountTransaction;
 use App\Traits\ApiResponse;
 use App\Models\Notification as NotificationModel;
 use App\Models\PaymentGateway;
@@ -31,6 +33,7 @@ use App\Models\Brand;
 use App\Models\FlashSale;
 use App\Models\Campaign;
 use App\Models\Subscriber;
+use App\Models\ProductSpecification;
 use App\Models\SupportTicket;
 use App\Models\TicketReply;
 use App\Models\RewardPoint;
@@ -47,10 +50,37 @@ class AdminController extends Controller
 {
     use ApiResponse;
 
+    protected function ensurePermission(string $permission): void
+    {
+        $user = auth()->user();
+        
+        if (!$user) {
+            $this->error('Unauthenticated.', 401);
+        }
+        
+        // super_admin and admin have all permissions
+        if (in_array($user->role, ['super_admin', 'admin'])) {
+            return;
+        }
+        
+        // For users with role_id (manager, staff, etc.), check role model permissions
+        if ($user->role_id) {
+            $role = $user->role()->first();
+            if ($role && !$role->hasPermission($permission)) {
+                $this->error('You do not have the required permission: ' . $permission, 403);
+            }
+        } else {
+            // If no role_id, deny access (shouldn't reach here for admin dashboard)
+            $this->error('You do not have the required permission: ' . $permission, 403);
+        }
+    }
+
     // ==================== DASHBOARD ====================
 
     public function dashboard(): JsonResponse
     {
+        $this->ensurePermission('dashboard.view');
+        
         $totalRevenue = Order::where('payment_status', 'paid')->sum('total');
         $totalOrders = Order::count();
         $totalProducts = Product::count();
@@ -144,6 +174,8 @@ class AdminController extends Controller
 
     public function getProducts(Request $request): JsonResponse
     {
+        $this->ensurePermission('products.view');
+        
         $query = Product::with(['category', 'brand', 'images']);
 
         if ($search = $request->search) {
@@ -156,6 +188,7 @@ class AdminController extends Controller
 
     public function createProduct(Request $request): JsonResponse
     {
+        $this->ensurePermission('products.create');
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'slug' => 'required|string|unique:products,slug',
@@ -176,6 +209,7 @@ class AdminController extends Controller
             'tags' => 'nullable|array',
             'colors' => 'nullable|array',
             'sizes' => 'nullable|array',
+            'specifications' => 'nullable|array',
         ]);
 
         $validated['is_active'] = $validated['is_active'] ?? true;
@@ -183,15 +217,29 @@ class AdminController extends Controller
         $validated['is_flash_sale'] = $validated['is_flash_sale'] ?? false;
         $validated['is_best_seller'] = $validated['is_best_seller'] ?? false;
 
-        // Extract colors and sizes before creating product
+        // Extract colors, sizes, and specifications before creating product
         $colors = $validated['colors'] ?? [];
         $sizes = $validated['sizes'] ?? [];
-        unset($validated['colors'], $validated['sizes']);
+        
+        // Handle specifications - can be JSON string or array
+        $specifications = [];
+        if (!empty($validated['specifications'])) {
+            if (is_string($validated['specifications'])) {
+                $specifications = json_decode($validated['specifications'], true) ?? [];
+            } elseif (is_array($validated['specifications'])) {
+                $specifications = $validated['specifications'];
+            }
+        }
+        
+        unset($validated['colors'], $validated['sizes'], $validated['specifications']);
 
         $product = Product::create($validated);
 
         // Handle colors and sizes as attributes
         $this->syncProductAttributes($product, $colors, $sizes);
+
+        // Handle specifications
+        $this->syncProductSpecifications($product, $specifications);
 
         // Handle images
         if ($request->hasFile('images')) {
@@ -205,11 +253,13 @@ class AdminController extends Controller
             }
         }
 
-        return $this->success($product->load('images'), 'Product created', 201);
+        return $this->success($product->load(['images', 'specifications']), 'Product created', 201);
     }
 
     public function updateProduct(Request $request, int $id): JsonResponse
     {
+        $this->ensurePermission('products.edit');
+        
         $product = Product::findOrFail($id);
         $validated = $request->validate([
             'name' => 'sometimes|string|max:255',
@@ -231,17 +281,32 @@ class AdminController extends Controller
             'tags' => 'nullable|array',
             'colors' => 'nullable|array',
             'sizes' => 'nullable|array',
+            'specifications' => 'nullable|array',
         ]);
 
-        // Extract colors and sizes before updating product
+        // Extract colors, sizes, and specifications before updating product
         $colors = $validated['colors'] ?? [];
         $sizes = $validated['sizes'] ?? [];
-        unset($validated['colors'], $validated['sizes']);
+        
+        // Handle specifications - can be JSON string or array
+        $specifications = [];
+        if (!empty($validated['specifications'])) {
+            if (is_string($validated['specifications'])) {
+                $specifications = json_decode($validated['specifications'], true) ?? [];
+            } elseif (is_array($validated['specifications'])) {
+                $specifications = $validated['specifications'];
+            }
+        }
+        
+        unset($validated['colors'], $validated['sizes'], $validated['specifications']);
 
         $product->update($validated);
 
         // Handle colors and sizes as attributes
         $this->syncProductAttributes($product, $colors, $sizes);
+
+        // Handle specifications
+        $this->syncProductSpecifications($product, $specifications);
 
         if ($request->hasFile('images')) {
             // Delete old images
@@ -260,11 +325,12 @@ class AdminController extends Controller
             }
         }
 
-        return $this->success($product->fresh()->load('images'), 'Product updated');
+        return $this->success($product->fresh()->load(['images', 'specifications']), 'Product updated');
     }
 
     public function deleteProduct(int $id): JsonResponse
     {
+        $this->ensurePermission('products.delete');
         $product = Product::findOrFail($id);
         foreach ($product->images as $img) {
             Storage::disk('public')->delete($img->image);
@@ -307,10 +373,30 @@ class AdminController extends Controller
         $product->attributes()->sync($allValueIds);
     }
 
+    private function syncProductSpecifications(Product $product, array $specifications): void
+    {
+        // Delete existing specifications
+        $product->specifications()->delete();
+
+        // Create new specifications
+        foreach ($specifications as $index => $spec) {
+            if (isset($spec['name']) && isset($spec['value'])) {
+                $product->specifications()->create([
+                    'name' => $spec['name'],
+                    'value' => $spec['value'],
+                    'group' => $spec['group'] ?? null,
+                    'sort_order' => $index,
+                ]);
+            }
+        }
+    }
+
     // ==================== CATEGORIES ====================
 
     public function getCategories(): JsonResponse
     {
+        $this->ensurePermission('categories.view');
+        
         $categories = Category::withCount('products')->latest()->get();
         return $this->success($categories);
     }
@@ -380,6 +466,7 @@ class AdminController extends Controller
 
     public function getBrands(): JsonResponse
     {
+        $this->ensurePermission('brands.view');
         $brands = Brand::withCount('products')->latest()->get();
         return $this->success($brands);
     }
@@ -443,6 +530,7 @@ class AdminController extends Controller
 
     public function getOrders(Request $request): JsonResponse
     {
+        $this->ensurePermission('orders.view');
         $query = Order::with(['user', 'items.product.images', 'deliveryBoy', 'deliveryBooking.partnerInfo', 'shippingAddress']);
 
         if ($status = $request->status) {
@@ -455,6 +543,8 @@ class AdminController extends Controller
 
     public function updateOrderStatus(Request $request, int $id): JsonResponse
     {
+        $this->ensurePermission('orders.update_status');
+        
         $validated = $request->validate([
             'status' => 'required|string|in:pending,confirmed,processing,shipped,delivered,cancelled,returned,return_requested,refunded',
             'payment_status' => 'sometimes|string|in:pending,paid,failed,refunded',
@@ -464,8 +554,36 @@ class AdminController extends Controller
         $oldStatus = $order->status;
 
         $updateData = ['status' => $validated['status']];
+        
 
         // Update payment status if provided
+        // if (
+        //     isset($validated['payment_status']) &&
+        //     $validated['payment_status'] === 'paid' &&
+        //     $oldStatus !== 'paid' &&
+        //     $order->total > 0
+        // ) {
+
+        //     $defaultAccount = AdminAccount::where('is_default', true)->first();
+
+        //     if ($defaultAccount) {
+        //         $newBalance = $defaultAccount->current_balance + $order->total;
+
+        //         AdminAccountTransaction::create([
+        //             'account_id' => $defaultAccount->id,
+        //             'transaction_type' => 'order_payment',
+        //             'amount' => $order->total,
+        //             'balance_after' => $newBalance,
+        //             'description' => 'Payment received for Order #' . ($order->order_number ?? $order->id),
+        //             'reference_id' => $order->order_number ?? $order->id,
+        //             'reference_type' => 'order',
+        //             'transaction_date' => now(),
+        //             'created_by' => auth()->id(),
+        //         ]);
+
+        //         $defaultAccount->update(['current_balance' => $newBalance]);
+        //     }
+        // }
         if (isset($validated['payment_status'])) {
             $updateData['payment_status'] = $validated['payment_status'];
         }
@@ -500,9 +618,43 @@ class AdminController extends Controller
         // - Payment just became 'paid' AND order is already 'delivered'
         $wasAlreadyDeliveredAndPaid = ($oldStatus === 'delivered' && $oldPaymentStatus === 'paid');
         $isNowDeliveredAndPaid = ($order->status === 'delivered' && $order->payment_status === 'paid');
-        
+
         if ($isNowDeliveredAndPaid && !$wasAlreadyDeliveredAndPaid) {
             $this->awardOrderPoints($order);
+        }
+
+        // Create admin account transaction when payment status changes to 'paid'
+        // Only if it wasn't already paid
+        if (
+            isset($validated['payment_status']) &&
+            $validated['payment_status'] === 'paid' &&
+            $oldPaymentStatus !== 'paid' &&
+            $order->total > 0
+        ) {
+
+            // Find the default admin account
+            $defaultAccount = \App\Models\AdminAccount::where('is_default', true)->first();
+
+            if ($defaultAccount) {
+                // Calculate new balance
+                $newBalance = $defaultAccount->current_balance + $order->total;
+
+                // Create the transaction
+                \App\Models\AdminAccountTransaction::create([
+                    'account_id' => $defaultAccount->id,
+                    'transaction_type' => 'order_payment',
+                    'amount' => $order->total,
+                    'balance_after' => $newBalance,
+                    'description' => 'Payment received for Order #' . ($order->order_number ?? $order->id),
+                    'reference_id' => $order->order_number ?? $order->id,
+                    'reference_type' => 'order',
+                    'transaction_date' => now(),
+                    'created_by' => auth()->id(),
+                ]);
+
+                // Update account balance
+                $defaultAccount->update(['current_balance' => $newBalance]);
+            }
         }
 
         // Send status change notification
@@ -530,6 +682,7 @@ class AdminController extends Controller
 
     public function getCustomers(Request $request): JsonResponse
     {
+        $this->ensurePermission('customers.view');
         $query = User::where('role', 'customer');
 
         if ($search = $request->search) {
@@ -571,7 +724,7 @@ class AdminController extends Controller
     public function debug(Request $request): JsonResponse
     {
         $user = $request->user();
-        
+
         return $this->success([
             'authenticated' => !!$user,
             'user' => $user ? [
@@ -2078,7 +2231,7 @@ class AdminController extends Controller
                 ->get();
         }
 
-        $couriers = $partners->map(fn (DeliveryPartner $p) => $checker->partnerOverview($p, $phone))->values();
+        $couriers = $partners->map(fn(DeliveryPartner $p) => $checker->partnerOverview($p, $phone))->values();
 
         return $this->success([
             'phone'    => $phone,
@@ -2462,7 +2615,7 @@ class AdminController extends Controller
         // Search by ticket number or subject
         if ($request->has('search') && !empty($request->search)) {
             $search = $request->search;
-            $query->where(function($q) use ($search) {
+            $query->where(function ($q) use ($search) {
                 $q->where('ticket_number', 'like', "%{$search}%")
                     ->orWhere('subject', 'like', "%{$search}%");
             });

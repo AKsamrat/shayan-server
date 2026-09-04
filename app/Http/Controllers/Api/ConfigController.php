@@ -21,6 +21,15 @@ class ConfigController extends Controller
         return $this->success($currencies);
     }
 
+    public function getDefaultCurrency(): JsonResponse
+    {
+        $currency = Currency::where('is_default', true)->first();
+        if (!$currency) {
+            $currency = Currency::orderBy('sort_order')->orderBy('id')->first();
+        }
+        return $this->success($currency);
+    }
+
     public function createCurrency(Request $request): JsonResponse
     {
         $validated = $request->validate([

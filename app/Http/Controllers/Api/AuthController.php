@@ -3,6 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\RewardPoint;
+use App\Models\Setting;
 use App\Models\User;
 use App\Models\Cart;
 use App\Models\Wallet;
@@ -64,6 +66,14 @@ class AuthController extends Controller
             'password' => 'required|string|min:8|confirmed',
         ]);
 
+        // Handle referral: get referrer_id from query parameter or request body
+        $referrerId = $request->query('ref') ?? $request->input('ref');
+        $referrer = null;
+        
+        if ($referrerId) {
+            $referrer = User::find($referrerId);
+        }
+
         $user = User::create([
             'name' => $validated['name'],
             'email' => $validated['email'],
@@ -71,10 +81,16 @@ class AuthController extends Controller
             'role' => 'customer',
             'is_verified' => false,
             'is_active' => true,
+            'referrer_id' => $referrer?->id,
         ]);
 
         // Create wallet for user
         Wallet::create(['user_id' => $user->id, 'balance' => 0, 'currency' => 'BDT']);
+
+        // Optionally: Award reward points to referrer for successful referral
+        if ($referrer && $referrer->id !== $user->id) {
+            $this->awardReferralPoints($referrer, $user);
+        }
 
         $token = $user->createToken('auth-token')->plainTextToken;
 
@@ -86,6 +102,24 @@ class AuthController extends Controller
             'user' => $userData,
             'token' => $token,
         ], 'Registration successful', 201);
+    }
+
+    /**
+     * Award points to referrer when a new user registers with their referral link.
+     */
+    private function awardReferralPoints(User $referrer, User $referredUser): void
+    {
+        $points = (int) Setting::getValue('referral_points_reward', 100);
+        
+        if ($points > 0) {
+            RewardPoint::create([
+                'user_id' => $referrer->id,
+                'points' => $points,
+                'type' => 'earned',
+                'description' => "Referral bonus: {$referredUser->name} registered using your link",
+                'expires_at' => null,
+            ]);
+        }
     }
 
     public function logout(Request $request): JsonResponse

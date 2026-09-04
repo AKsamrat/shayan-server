@@ -6,6 +6,8 @@ use App\Models\User;
 use App\Models\RewardPoint;
 use App\Models\Order;
 use App\Models\Setting;
+use App\Models\Wallet;
+use App\Models\WalletTransaction;
 use Illuminate\Support\Carbon;
 
 class RewardPointService
@@ -179,6 +181,22 @@ class RewardPointService
             'type' => 'redeemed',
             'description' => $desc,
             'expires_at' => null,
+        ]);
+
+        // Add the discount amount to user's wallet
+        $wallet = Wallet::firstOrCreate(
+            ['user_id' => $user->id],
+            ['balance' => 0, 'currency' => 'BDT']
+        );
+        
+        $wallet->increment('balance', $discount);
+        
+        // Create wallet transaction record
+        WalletTransaction::create([
+            'wallet_id' => $wallet->id,
+            'type' => 'credit',
+            'amount' => $discount,
+            'description' => "Redeemed {$points} points - {$desc}"
         ]);
 
         // Update user's balance cache

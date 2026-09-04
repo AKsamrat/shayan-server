@@ -34,7 +34,18 @@ class User extends Authenticatable
         'sms_shipping_updates',
         'sms_promotions',
         'reward_points_balance',
+        'referrer_id',
     ];
+
+    public function referrer()
+    {
+        return $this->belongsTo(User::class, 'referrer_id');
+    }
+
+    public function referrals()
+    {
+        return $this->hasMany(User::class, 'referrer_id');
+    }
 
     protected $hidden = ['password', 'remember_token'];
 

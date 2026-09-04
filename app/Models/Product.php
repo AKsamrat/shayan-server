@@ -131,4 +131,9 @@ class Product extends Model
     {
         return $this->belongsTo(VendorShop::class, 'vendor_id');
     }
+
+    public function specifications()
+    {
+        return $this->hasMany(ProductSpecification::class)->orderBy('sort_order');
+    }
 }

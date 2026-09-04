@@ -510,6 +510,51 @@ class PermissionModulesSeeder extends Seeder
                     ['name' => 'use', 'display_name' => 'Use', 'sort_order' => 1],
                 ]
             ],
+            // Suppliers
+            [
+                'name' => 'suppliers',
+                'display_name' => 'Suppliers',
+                'description' => 'Manage suppliers and inventory',
+                'sort_order' => 38,
+                'is_system' => true,
+                'actions' => [
+                    ['name' => 'view', 'display_name' => 'View', 'sort_order' => 1],
+                    ['name' => 'create', 'display_name' => 'Create', 'sort_order' => 2],
+                    ['name' => 'edit', 'display_name' => 'Edit', 'sort_order' => 3],
+                    ['name' => 'delete', 'display_name' => 'Delete', 'sort_order' => 4],
+                    ['name' => 'manage_inventory', 'display_name' => 'Manage Inventory', 'sort_order' => 5],
+                ]
+            ],
+            // Supplier Purchases
+            [
+                'name' => 'supplier_purchases',
+                'display_name' => 'Supplier Purchases',
+                'description' => 'Manage product purchases from suppliers',
+                'sort_order' => 39,
+                'is_system' => true,
+                'actions' => [
+                    ['name' => 'view', 'display_name' => 'View', 'sort_order' => 1],
+                    ['name' => 'create', 'display_name' => 'Create', 'sort_order' => 2],
+                    ['name' => 'edit', 'display_name' => 'Edit', 'sort_order' => 3],
+                    ['name' => 'delete', 'display_name' => 'Delete', 'sort_order' => 4],
+                    ['name' => 'manage_payments', 'display_name' => 'Manage Payments', 'sort_order' => 5],
+                ]
+            ],
+            // Supplier Accounts
+            [
+                'name' => 'supplier_accounts',
+                'display_name' => 'Supplier Accounts',
+                'description' => 'Manage supplier accounts and transactions',
+                'sort_order' => 40,
+                'is_system' => true,
+                'actions' => [
+                    ['name' => 'view', 'display_name' => 'View', 'sort_order' => 1],
+                    ['name' => 'create', 'display_name' => 'Create', 'sort_order' => 2],
+                    ['name' => 'edit', 'display_name' => 'Edit', 'sort_order' => 3],
+                    ['name' => 'delete', 'display_name' => 'Delete', 'sort_order' => 4],
+                    ['name' => 'view_transactions', 'display_name' => 'View Transactions', 'sort_order' => 5],
+                ]
+            ],
             // Customer Account Modules
             [
                 'name' => 'account_profile',

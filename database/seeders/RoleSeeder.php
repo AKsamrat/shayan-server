@@ -81,9 +81,29 @@ class RoleSeeder extends Seeder
             'roles.edit',
             'roles.delete',
             'pos.use',
+            // Supplier permissions
+            'suppliers.view',
+            'suppliers.create',
+            'suppliers.edit',
+            'suppliers.delete',
+            'suppliers.manage_inventory',
+            'supplier_purchases.view',
+            'supplier_purchases.create',
+            'supplier_purchases.edit',
+            'supplier_purchases.delete',
+            'supplier_purchases.manage_payments',
+            'supplier_accounts.view',
+            'supplier_accounts.create',
+            'supplier_accounts.edit',
+            'supplier_accounts.delete',
+            'supplier_accounts.view_transactions',
         ];
 
-        $adminPermissions = array_filter($allPermissions, fn($p) => !str_starts_with($p, 'roles.'));
+        // Super Admin gets ALL permissions including role management
+        $superAdminPermissions = $allPermissions;
+        
+        // Admin also gets ALL permissions including role management
+        $adminPermissions = $allPermissions;
 
         $managerPermissions = [
             'dashboard.view',
@@ -112,6 +132,14 @@ class RoleSeeder extends Seeder
             'reviews.view',
             'shipping.view',
             'pos.use',
+            // Supplier permissions for managers
+            'suppliers.view',
+            'suppliers.edit',
+            'suppliers.manage_inventory',
+            'supplier_purchases.view',
+            'supplier_purchases.create',
+            'supplier_accounts.view',
+            'supplier_accounts.view_transactions',
         ];
 
         $editorPermissions = [
@@ -174,14 +202,14 @@ class RoleSeeder extends Seeder
             [
                 'name' => 'Super Admin',
                 'slug' => 'super_admin',
-                'description' => 'Full access to all system features and settings.',
-                'permissions' => $allPermissions,
+                'description' => 'Full access to all system features and settings. Highest privilege level.',
+                'permissions' => $superAdminPermissions,
                 'is_system' => true,
             ],
             [
                 'name' => 'Admin',
                 'slug' => 'admin',
-                'description' => 'Administrative access without role management.',
+                'description' => 'Full administrative access including role and user management.',
                 'permissions' => $adminPermissions,
                 'is_system' => true,
             ],
@@ -222,10 +250,6 @@ class RoleSeeder extends Seeder
             );
         }
 
-        // Assign admin role_id to the seeded admin user
-        $adminRole = Role::where('slug', 'admin')->first();
-        \App\Models\User::where('email', 'admin@shayanmart.com')->update([
-            'role_id' => $adminRole?->id,
-        ]);
+        // Note: Role assignments to users are handled in DatabaseSeeder::seedUsers()
     }
 }

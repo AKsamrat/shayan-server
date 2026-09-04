@@ -72,5 +72,12 @@ class SettingsSeeder extends Seeder
             'topbar_show_language'  => true,
         ];
         Setting::setGroup('topbar', $topbar);
+
+        // ==================== REFERRAL SETTINGS ====================
+        $referral = [
+            'referral_points_reward' => 100, // Points awarded to referrer per successful registration
+            'referral_enabled'       => true,
+        ];
+        Setting::setGroup('referral', $referral);
     }
 }

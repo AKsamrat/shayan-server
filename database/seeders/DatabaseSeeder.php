@@ -50,6 +50,19 @@ class DatabaseSeeder extends Seeder
 
     private function seedUsers(): void
     {
+        // Create Super Admin user
+        $superAdmin = User::create([
+            'name' => 'Super Admin',
+            'email' => 'superadmin@shayanmart.com',
+            'password' => Hash::make('password'),
+            'role' => 'super_admin',
+            'is_verified' => true,
+            'is_active' => true,
+            'phone' => '+8801712345678',
+        ]);
+        Wallet::create(['user_id' => $superAdmin->id, 'balance' => 0, 'currency' => 'BDT']);
+        
+        // Create Admin user
         $admin = User::create([
             'name' => 'Admin',
             'email' => 'admin@shayanmart.com',
@@ -57,9 +70,20 @@ class DatabaseSeeder extends Seeder
             'role' => 'admin',
             'is_verified' => true,
             'is_active' => true,
-            'phone' => '+8801712345678',
+            'phone' => '+8801712345679',
         ]);
         Wallet::create(['user_id' => $admin->id, 'balance' => 0, 'currency' => 'BDT']);
+        
+        // Assign role_ids after roles are seeded
+        $superAdminRole = \App\Models\Role::where('slug', 'super_admin')->first();
+        $adminRole = \App\Models\Role::where('slug', 'admin')->first();
+        
+        if ($superAdminRole) {
+            $superAdmin->update(['role_id' => $superAdminRole->id]);
+        }
+        if ($adminRole) {
+            $admin->update(['role_id' => $adminRole->id]);
+        }
 
         $customer = User::create([
             'name' => 'John Doe',

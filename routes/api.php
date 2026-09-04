@@ -143,7 +143,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/customer/rewards/check', [CustomerController::class, 'checkRedemption']);
 
     // Admin Routes
-    Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin'])->group(function () {
+    Route::prefix('admin')->middleware(['auth:sanctum', 'role:admin,super_admin,manager,staff'])->group(function () {
         Route::get('/dashboard', [AdminController::class, 'dashboard']);
 
         // Admin Roles & Permissions

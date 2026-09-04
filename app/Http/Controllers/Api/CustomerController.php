@@ -5,16 +5,21 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\Notification;
+use App\Models\Setting;
+use App\Models\User;
 use App\Models\Wallet;
 use App\Models\WalletTransaction;
 use App\Models\RewardPoint;
 use App\Models\SupportTicket;
 use App\Models\TicketReply;
 use App\Services\NotificationService;
+use App\Services\RewardPointService;
 use App\Traits\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rules\Password;
 
 class CustomerController extends Controller
 {
@@ -49,6 +54,24 @@ class CustomerController extends Controller
         $query = Notification::where('user_id', $request->user()->id)->latest();
         $result = $this->paginated($query);
         return $this->success($result);
+    }
+
+     public function updatePassword(Request $request, User $customer)
+    {
+        $validated = $request->validate([
+            'password' => ['required', Password::min(8)],
+            'password_confirmation' => ['required', 'same:password'],
+        ]);
+
+        $customer->update([
+            'password' => Hash::make($validated['password'])
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Password updated successfully',
+            'data' => $customer
+        ]);
     }
 
     public function markNotificationRead(Request $request, int $id): JsonResponse
@@ -93,10 +116,32 @@ class CustomerController extends Controller
 
     public function referrals(Request $request): JsonResponse
     {
+        $user = $request->user();
+        
+        // Get all users who registered with this user's referral link
+        $referrals = User::where('referrer_id', $user->id)->get();
+        
+        // Calculate total earned points from referrals
+        $totalEarnedFromReferrals = RewardPoint::where('user_id', $user->id)
+            ->where('description', 'like', '%Referral bonus%')
+            ->sum('points');
+        
+        // Get referral points per successful referral from settings
+        $pointsPerReferral = (int) Setting::getValue('referral_points_reward', 100);
+
         return $this->success([
-            'link' => url('/register?ref=' . $request->user()->id),
-            'total_referrals' => 0,
-            'total_earned' => 0,
+            'ref_code' => $user->id,
+            'total_referrals' => $referrals->count(),
+            'total_earned' => $totalEarnedFromReferrals,
+            'referrals' => $referrals->map(function ($referral) {
+                return [
+                    'id' => $referral->id,
+                    'name' => $referral->name,
+                    'email' => $referral->email,
+                    'created_at' => $referral->created_at,
+                ];
+            }),
+            'points_per_referral' => $pointsPerReferral,
         ]);
     }
 

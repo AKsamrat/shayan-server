@@ -59,6 +59,10 @@ class CmsController extends Controller
         $payload['header_logo'] = $general['header_logo'] ?? null;
         $payload['footer_logo'] = $general['footer_logo'] ?? null;
         $payload['site_name'] = $general['site_name'] ?? 'ShayanMart';
+        $payload['primary_color'] = $general['primary_color'] ?? '#e11d48';
+        $payload['secondary_color'] = $general['secondary_color'] ?? '#f97316';
+        $payload['accent_color'] = $general['accent_color'] ?? '#8b5cf6';
+        $payload['homepage_layout'] = $general['homepage_layout'] ?? 'layout_1';
 
         return $this->success($payload);
     }
@@ -77,8 +81,26 @@ class CmsController extends Controller
 
     public function testimonials(): JsonResponse
     {
-        $testimonials = Testimonial::where('is_active', true)->get();
-        return $this->success($testimonials);
+        // Use actual dynamic product reviews for the landing page review section
+        // Get 10 recent 4 or 5 star approved reviews
+        $reviews = \App\Models\Review::with('user')
+            ->where('is_approved', true)
+            ->where('rating', '>=', 4)
+            ->latest()
+            ->take(10)
+            ->get()
+            ->map(function ($review) {
+                return [
+                    'id' => $review->id,
+                    'name' => $review->user ? $review->user->name : 'Anonymous',
+                    'designation' => 'Verified Buyer',
+                    'comment' => $review->comment,
+                    'rating' => $review->rating,
+                    'image' => $review->user ? $review->user->avatar : null,
+                ];
+            });
+
+        return $this->success($reviews);
     }
 
     public function faqs(): JsonResponse

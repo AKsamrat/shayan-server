@@ -108,6 +108,8 @@ class OrderController extends Controller
             'billing_address_id' => $validated['billing_address_id'] ?? $validated['shipping_address_id'],
             'notes' => $validated['notes'] ?? null,
             'shipping_method' => $request->input('shipping_method'),
+            'ip_address' => $request->input('ip_address', $request->ip()),
+            'mac_address' => $request->input('mac_address'),
         ]);
 
         // Create order items

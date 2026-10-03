@@ -7,6 +7,7 @@ use App\Models\Product;
 use App\Models\Category;
 use App\Models\Order;
 use App\Models\User;
+use App\Models\Role;
 use App\Models\Blog;
 use App\Models\Slider;
 use App\Models\Banner;
@@ -45,6 +46,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Validator;
 
 class AdminController extends Controller
 {
@@ -55,7 +58,7 @@ class AdminController extends Controller
         $user = auth()->user();
         
         if (!$user) {
-            $this->error('Unauthenticated.', 401);
+            abort(401, 'Unauthenticated.');
         }
         
         // super_admin and admin have all permissions
@@ -67,11 +70,11 @@ class AdminController extends Controller
         if ($user->role_id) {
             $role = $user->role()->first();
             if ($role && !$role->hasPermission($permission)) {
-                $this->error('You do not have the required permission: ' . $permission, 403);
+                abort(403, 'You do not have the required permission: ' . $permission);
             }
         } else {
             // If no role_id, deny access (shouldn't reach here for admin dashboard)
-            $this->error('You do not have the required permission: ' . $permission, 403);
+            abort(403, 'You do not have the required permission: ' . $permission);
         }
     }
 
@@ -531,7 +534,7 @@ class AdminController extends Controller
     public function getOrders(Request $request): JsonResponse
     {
         $this->ensurePermission('orders.view');
-        $query = Order::with(['user', 'items.product.images', 'deliveryBoy', 'deliveryBooking.partnerInfo', 'shippingAddress']);
+        $query = Order::with(['user', 'items.product.images', 'deliveryBoy', 'deliveryBooking.partnerInfo', 'shippingAddress', 'handler']);
 
         if ($status = $request->status) {
             $query->where('status', $status);
@@ -539,6 +542,21 @@ class AdminController extends Controller
 
         $result = $this->paginated($query->latest());
         return $this->success($result);
+    }
+
+    public function lockOrder(Request $request, int $id): JsonResponse
+    {
+        $this->ensurePermission('orders.view');
+        $order = Order::findOrFail($id);
+
+        if (!$order->handled_by) {
+            $order->update(['handled_by' => auth()->id()]);
+            $order->load('handler');
+        } elseif ($order->handled_by !== auth()->id() && auth()->user()->role !== 'admin') {
+            return $this->error('This order is already being handled by someone else', 403);
+        }
+
+        return $this->success($order, 'Order locked successfully');
     }
 
     public function updateOrderStatus(Request $request, int $id): JsonResponse
@@ -694,6 +712,46 @@ class AdminController extends Controller
 
         $result = $this->paginated($query->latest());
         return $this->success($result);
+    }
+
+    public function updateCustomerPassword(Request $request, $id): JsonResponse
+    {
+        $this->ensurePermission('customers.view'); // or appropriate permission
+
+        $validator = Validator::make($request->all(), [
+            'password' => 'required|min:8|confirmed',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->error($validator->errors()->first(), 422);
+        }
+
+        $customer = User::where('role', 'customer')->find($id);
+        if (!$customer) {
+            return $this->error('Customer not found', 404);
+        }
+
+        $customer->password = Hash::make($request->password);
+        $customer->save();
+
+        return $this->success($customer, 'Customer password updated successfully');
+    }
+
+    public function impersonateCustomer($id): JsonResponse
+    {
+        $this->ensurePermission('customers.view'); // or appropriate permission
+
+        $customer = User::where('role', 'customer')->find($id);
+        if (!$customer) {
+            return $this->error('Customer not found', 404);
+        }
+
+        $token = $customer->createToken('auth_token')->plainTextToken;
+
+        return $this->success([
+            'token' => $token,
+            'user' => $customer
+        ], 'Impersonation token generated');
     }
 
     // ==================== REPORTS ====================
@@ -1455,10 +1513,217 @@ class AdminController extends Controller
 
     // ==================== STAFF ====================
 
-    public function getStaff(): JsonResponse
+    public function getStaff(Request $request): JsonResponse
     {
-        $staff = User::whereIn('role', ['admin', 'staff'])->latest()->get();
+        $search = $request->get('search');
+        $roleId = $request->get('role_id');
+        $status = $request->get('status');
+
+        $superAdminRoleIds = Role::where('slug', 'super_admin')->pluck('id')->toArray();
+
+        $query = User::where('role', '!=', 'super_admin')
+            ->where(function ($q) {
+                $q->whereIn('role', ['admin', 'manager', 'editor', 'staff', 'vendor_manager', 'support_agent', 'content_manager', 'marketing_manager'])
+                  ->orWhere(function ($sub) {
+                      $sub->whereNotIn('role', ['customer', 'vendor', 'delivery_boy', 'super_admin'])
+                          ->whereNotNull('role_id');
+                  });
+            });
+
+        if (!empty($superAdminRoleIds)) {
+            $query->where(function ($q) use ($superAdminRoleIds) {
+                $q->whereNotIn('role_id', $superAdminRoleIds)
+                  ->orWhereNull('role_id');
+            });
+        }
+
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('email', 'like', "%{$search}%")
+                  ->orWhere('phone', 'like', "%{$search}%");
+            });
+        }
+
+        if ($roleId) {
+            $query->where('role_id', $roleId);
+        }
+
+        if ($status !== null && $status !== '') {
+            $isActive = filter_var($status, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($isActive !== null) {
+                $query->where('is_active', $isActive);
+            }
+        }
+
+        $staff = $query->latest()->get();
+
+        // Attach role info without breaking string enum `role`
+        $roleIds = $staff->pluck('role_id')->filter()->unique();
+        $rolesById = Role::whereIn('id', $roleIds)->get()->keyBy('id');
+
+        $staff = $staff->filter(function ($user) use ($rolesById) {
+            if ($user->role === 'super_admin') {
+                return false;
+            }
+            if ($user->role_id && isset($rolesById[$user->role_id])) {
+                if ($rolesById[$user->role_id]->slug === 'super_admin') {
+                    return false;
+                }
+            }
+            return true;
+        })->values();
+
+        $staff->transform(function ($user) use ($rolesById) {
+            if ($user->role_id && isset($rolesById[$user->role_id])) {
+                $user->role_name = $rolesById[$user->role_id]->name;
+                $user->role_details = $rolesById[$user->role_id];
+            } else {
+                $user->role_name = ucfirst(str_replace('_', ' ', $user->role));
+            }
+            return $user;
+        });
+
         return $this->success($staff);
+    }
+
+    public function createStaff(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|email|max:255|unique:users,email',
+            'phone' => 'nullable|string|max:20',
+            'password' => 'required|string|min:6',
+            'role_id' => 'nullable|exists:roles,id',
+            'role' => 'nullable|string|max:50',
+            'is_active' => 'sometimes|boolean',
+        ]);
+
+        $roleSlug = 'staff';
+        $roleId = !empty($validated['role_id']) ? (int) $validated['role_id'] : null;
+
+        if ($roleId) {
+            $roleModel = Role::find($roleId);
+            if ($roleModel) {
+                $validEnumRoles = ['admin', 'super_admin', 'manager', 'editor', 'staff', 'vendor_manager', 'support_agent', 'content_manager', 'marketing_manager'];
+                $roleSlug = in_array($roleModel->slug, $validEnumRoles) ? $roleModel->slug : 'staff';
+            }
+        } elseif (!empty($validated['role'])) {
+            $roleSlug = $validated['role'];
+            $roleModel = Role::where('slug', $roleSlug)->first();
+            if ($roleModel) {
+                $roleId = $roleModel->id;
+            }
+        } else {
+            $defaultStaffRole = Role::where('slug', 'staff')->first();
+            if ($defaultStaffRole) {
+                $roleId = $defaultStaffRole->id;
+                $roleSlug = 'staff';
+            }
+        }
+
+        if ($roleSlug === 'super_admin') {
+            return $this->error('Cannot assign Super Admin role to staff.', 403);
+        }
+
+        $user = User::create([
+            'name' => $validated['name'],
+            'email' => $validated['email'],
+            'phone' => $validated['phone'] ?? null,
+            'password' => Hash::make($validated['password']),
+            'role' => $roleSlug,
+            'role_id' => $roleId,
+            'is_active' => $validated['is_active'] ?? true,
+            'is_verified' => true,
+        ]);
+
+        if ($roleId) {
+            $roleModel = Role::find($roleId);
+            $user->role_name = $roleModel ? $roleModel->name : ucfirst($roleSlug);
+            $user->role_details = $roleModel;
+        } else {
+            $user->role_name = ucfirst(str_replace('_', ' ', $roleSlug));
+        }
+
+        return $this->success($user->makeHidden(['password']), 'Staff member created successfully', 201);
+    }
+
+    public function updateStaff(Request $request, int $id): JsonResponse
+    {
+        $staff = User::where('role', '!=', 'super_admin')
+            ->where(function ($q) {
+                $q->whereIn('role', ['admin', 'manager', 'editor', 'staff', 'vendor_manager', 'support_agent', 'content_manager', 'marketing_manager'])
+                  ->orWhereNotNull('role_id');
+            })->findOrFail($id);
+
+        if ($staff->role === 'super_admin') {
+            return $this->error('Super Admin cannot be modified via staff management.', 403);
+        }
+
+        $validated = $request->validate([
+            'name' => 'sometimes|string|max:255',
+            'email' => 'sometimes|email|max:255|unique:users,email,' . $id,
+            'phone' => 'nullable|string|max:20',
+            'password' => 'nullable|string|min:6',
+            'role_id' => 'nullable|exists:roles,id',
+            'role' => 'nullable|string|max:50',
+            'is_active' => 'sometimes|boolean',
+        ]);
+
+        if (!empty($validated['password'])) {
+            $validated['password'] = Hash::make($validated['password']);
+        } else {
+            unset($validated['password']);
+        }
+
+        if (array_key_exists('role_id', $validated)) {
+            $roleId = !empty($validated['role_id']) ? (int) $validated['role_id'] : null;
+            $validated['role_id'] = $roleId;
+            if ($roleId) {
+                $roleModel = Role::find($roleId);
+                if ($roleModel) {
+                    $validEnumRoles = ['admin', 'super_admin', 'manager', 'editor', 'staff', 'vendor_manager', 'support_agent', 'content_manager', 'marketing_manager'];
+                    $validated['role'] = in_array($roleModel->slug, $validEnumRoles) ? $roleModel->slug : 'staff';
+                }
+            }
+        } elseif (!empty($validated['role'])) {
+            $roleModel = Role::where('slug', $validated['role'])->first();
+            if ($roleModel) {
+                $validated['role_id'] = $roleModel->id;
+            }
+        }
+
+        $staff->update($validated);
+
+        if ($staff->role_id) {
+            $roleModel = Role::find($staff->role_id);
+            $staff->role_name = $roleModel ? $roleModel->name : ucfirst($staff->role);
+            $staff->role_details = $roleModel;
+        } else {
+            $staff->role_name = ucfirst(str_replace('_', ' ', $staff->role));
+        }
+
+        return $this->success($staff->fresh()->makeHidden(['password']), 'Staff member updated successfully');
+    }
+
+    public function deleteStaff(int $id): JsonResponse
+    {
+        $staff = User::where(function ($q) {
+            $q->whereIn('role', ['admin', 'super_admin', 'manager', 'editor', 'staff', 'vendor_manager', 'support_agent', 'content_manager', 'marketing_manager'])
+              ->orWhereNotNull('role_id');
+        })->findOrFail($id);
+
+        if (auth()->id() === $staff->id) {
+            return $this->error('You cannot delete your own account', 400);
+        }
+
+        if ($staff->role === 'super_admin') {
+            return $this->error('Super Admin account cannot be deleted', 403);
+        }
+
+        $staff->delete();
+
+        return $this->success(null, 'Staff member deleted successfully');
     }
 
     // ==================== RETURNS & REFUNDS ====================
@@ -1959,6 +2224,19 @@ class AdminController extends Controller
         return $this->success($notifications, count($notifications) . ' notifications sent', 201);
     }
 
+    public function markNotificationRead($id): JsonResponse
+    {
+        $notification = NotificationModel::findOrFail($id);
+        $notification->update(['is_read' => true]);
+        return $this->success($notification, 'Notification marked as read');
+    }
+
+    public function markAllRead(): JsonResponse
+    {
+        NotificationModel::where('is_read', false)->update(['is_read' => true]);
+        return $this->success(null, 'All notifications marked as read');
+    }
+
     public function deleteNotification(int $id): JsonResponse
     {
         $notification = NotificationModel::findOrFail($id);
@@ -2141,7 +2419,7 @@ class AdminController extends Controller
             $query->where('status', $status);
         }
 
-        $result = $this->paginated($query->withCount('bookings')->latest());
+        $result = $query->withCount('bookings')->latest()->get();
         return $this->success($result);
     }
 
@@ -2213,12 +2491,15 @@ class AdminController extends Controller
     public function getCustomerCourierOverview(Request $request, CourierFraudChecker $checker): JsonResponse
     {
         $validated = $request->validate([
-            'phone'      => 'required|string|max:30',
-            'partner'    => 'nullable|string',
-            'partner_id' => 'nullable|integer|exists:delivery_partners,id',
+            'phone'         => 'required|string|max:30',
+            'partner'       => 'nullable|string',
+            'partner_id'    => 'nullable|integer|exists:delivery_partners,id',
+            'refresh'       => 'nullable',
+            'force_refresh' => 'nullable',
         ]);
 
         $phone = trim($validated['phone']);
+        $refresh = $request->boolean('force_refresh') || $request->boolean('refresh');
 
         // Which partners to query: a specific one if given, otherwise all active partners.
         if (!empty($validated['partner'])) {
@@ -2231,7 +2512,7 @@ class AdminController extends Controller
                 ->get();
         }
 
-        $couriers = $partners->map(fn(DeliveryPartner $p) => $checker->partnerOverview($p, $phone))->values();
+        $couriers = $partners->map(fn(DeliveryPartner $p) => $checker->partnerOverview($p, $phone, $refresh))->values();
 
         return $this->success([
             'phone'    => $phone,
@@ -2291,15 +2572,77 @@ class AdminController extends Controller
         $deliveryAddress = $shippingAddress
             ? trim(($shippingAddress->address_line_1 ?? '') . ', ' . ($shippingAddress->city ?? '') . ', ' . ($shippingAddress->state ?? '') . ' ' . ($shippingAddress->postal_code ?? ''), ', ')
             : 'N/A';
+        if (strlen($deliveryAddress) < 10) {
+            $deliveryAddress .= ', ' . str_repeat(' ', 10 - strlen($deliveryAddress)) . 'Address info';
+        }
 
         $pickupAddress = $validated['pickup_address'] ?? 'Warehouse / Shop';
+        
+        $trackingId = strtoupper(uniqid($partner->slug . '-'));
+        $status = 'pending';
+        
+        // Clean phone number (keep only digits, ensure 11 length for BD)
+        $rawPhone = $shippingAddress->phone ?? $order->user->phone ?? '01700000000';
+        $cleanPhone = preg_replace('/[^0-9]/', '', $rawPhone);
+        if (strlen($cleanPhone) > 11 && str_starts_with($cleanPhone, '8801')) {
+            $cleanPhone = substr($cleanPhone, 2);
+        }
+        if (strlen($cleanPhone) < 11) {
+            $cleanPhone = str_pad($cleanPhone, 11, '0', STR_PAD_RIGHT);
+        }
+
+        try {
+            if ($partner->slug === 'steadfast') {
+                $steadfast = app(\App\Services\SteadfastCourierService::class);
+                $res = $steadfast->createOrder([
+                    'invoice' => $order->order_number,
+                    'recipient_name' => $order->user->name ?? 'N/A',
+                    'recipient_phone' => $cleanPhone,
+                    'recipient_address' => $deliveryAddress,
+                    'cod_amount' => $order->payment_status !== 'paid' ? (int)round($order->total) : 0,
+                    'note' => $order->notes ?? '',
+                ]);
+                if (isset($res['consignment_id'])) {
+                    $trackingId = $res['consignment_id'];
+                }
+            } elseif ($partner->slug === 'pathao') {
+                $pathao = app(\App\Services\PathaoCourierService::class);
+                
+                // Fetch the actual store_id from Pathao
+                $stores = $pathao->getStores();
+                $storeId = $stores['data']['data'][0]['store_id'] ?? $partner->config['merchant_id'] ?? 0;
+
+                // We pass standard item_type 2 (parcel), delivery_type 48 (normal) etc.
+                $res = $pathao->createOrder([
+                    'store_id' => $storeId,
+                    'merchant_order_id' => $order->order_number,
+                    'recipient_name' => $order->user->name ?? 'N/A',
+                    'recipient_phone' => $cleanPhone,
+                    'recipient_address' => $deliveryAddress,
+                    'delivery_type' => 48, // 48 is Normal Delivery typically
+                    'item_type' => 2, // 2 is Parcel
+                    'item_quantity' => 1,
+                    'item_weight' => 0.5,
+                    'amount_to_collect' => $order->payment_status !== 'paid' ? (int)round($order->total) : 0,
+                ]);
+                if (isset($res['data']['consignment_id'])) {
+                    $trackingId = $res['data']['consignment_id'];
+                } else {
+                    throw new \Exception(json_encode($res));
+                }
+            }
+        } catch (\Exception $e) {
+            // Log it but continue with local dummy tracking if the API fails or just fail
+            // It's usually better to fail so the admin knows Pathao rejected it.
+            return $this->error('Failed to book with ' . ucfirst($partner->slug) . ': ' . $e->getMessage(), 500);
+        }
 
         $booking = DeliveryBooking::create([
             'order_id' => $order->id,
             'order_number' => $order->order_number,
             'partner' => $partner->slug,
-            'tracking_id' => strtoupper(uniqid($partner->slug . '-')),
-            'status' => 'pending',
+            'tracking_id' => $trackingId,
+            'status' => $status,
             'pickup_address' => $pickupAddress,
             'delivery_address' => $deliveryAddress,
             'recipient_name' => $order->user->name ?? 'N/A',
@@ -2801,5 +3144,26 @@ class AdminController extends Controller
         $count = $service->expireOldPoints($user);
 
         return $this->success(['expired_count' => $count], 'Old points expired successfully');
+    }
+    public function updateReviewStatus(Request $request, int $id): JsonResponse
+    {
+        $request->validate(['is_approved' => 'required|boolean']);
+        $review = Review::findOrFail($id);
+        $review->update(['is_approved' => $request->boolean('is_approved')]);
+
+        // Recalculate product rating & count for approved reviews
+        if ($review->product_id) {
+            $product = Product::find($review->product_id);
+            if ($product) {
+                $approvedReviews = $product->reviews()->where('is_approved', true);
+                $avgRating = $approvedReviews->avg('rating') ?: 0;
+                $product->update([
+                    'average_rating' => round($avgRating, 1),
+                    'reviews_count' => $approvedReviews->count(),
+                ]);
+            }
+        }
+
+        return $this->success($review, 'Review status updated');
     }
 }

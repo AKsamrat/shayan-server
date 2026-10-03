@@ -18,6 +18,7 @@ class Review extends Model
         'images',
         'is_verified_purchase',
         'helpful_count',
+        'is_approved',
     ];
 
     protected function casts(): array
@@ -27,6 +28,7 @@ class Review extends Model
             'images' => 'array',
             'is_verified_purchase' => 'boolean',
             'helpful_count' => 'integer',
+            'is_approved' => 'boolean',
         ];
     }
 

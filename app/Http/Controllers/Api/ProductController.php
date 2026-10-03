@@ -216,7 +216,7 @@ class ProductController extends Controller
 
     public function reviews(Request $request, int $id): JsonResponse
     {
-        $query = Review::with('user')->where('product_id', $id)->latest();
+        $query = Review::with('user')->where('product_id', $id)->where('is_approved', true)->latest();
         $result = $this->paginated($query);
         return $this->success($result);
     }
@@ -229,23 +229,39 @@ class ProductController extends Controller
             'comment' => 'required|string',
         ]);
 
+        $user = $request->user();
+
+        // Check if user has purchased this product and order is delivered
+        $hasDeliveredOrder = \App\Models\Order::where('user_id', $user->id)
+            ->where('status', 'delivered')
+            ->whereHas('items', function ($q) use ($id) {
+                $q->where('product_id', $id);
+            })->exists();
+
+        if (!$hasDeliveredOrder) {
+            return $this->error('You can only review products you have purchased and received.', 403);
+        }
+
+        // Check if user already reviewed this product
+        $existingReview = \App\Models\Review::where('user_id', $user->id)
+            ->where('product_id', $id)
+            ->first();
+
+        if ($existingReview) {
+            return $this->error('You have already submitted a review for this product.', 400);
+        }
+
         $review = Review::create([
-            'user_id' => $request->user()->id,
+            'user_id' => $user->id,
             'product_id' => $id,
             'rating' => $validated['rating'],
             'title' => $validated['title'],
             'comment' => $validated['comment'],
+            'is_approved' => false,
+            'is_verified_purchase' => true,
         ]);
 
-        // Update product average rating
-        $product = Product::findOrFail($id);
-        $avgRating = $product->reviews()->avg('rating');
-        $product->update([
-            'average_rating' => round($avgRating, 1),
-            'reviews_count' => $product->reviews()->count(),
-        ]);
-
-        return $this->success($review->load('user'), 'Review added successfully', 201);
+        return $this->success($review->load('user'), 'Review submitted successfully! It will appear once approved by an admin.', 201);
     }
 
     public function search(Request $request): JsonResponse

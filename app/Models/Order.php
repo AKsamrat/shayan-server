@@ -40,6 +40,9 @@ class Order extends Model
         'refund_amount',
         'refund_reason',
         'refund_method',
+        'handled_by',
+        'ip_address',
+        'mac_address',
     ];
 
     protected function casts(): array
@@ -85,5 +88,10 @@ class Order extends Model
     public function deliveryBooking()
     {
         return $this->hasOne(DeliveryBooking::class)->latestOfMany();
+    }
+
+    public function handler()
+    {
+        return $this->belongsTo(User::class, 'handled_by');
     }
 }

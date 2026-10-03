@@ -70,11 +70,10 @@ class RoleController extends Controller
             'permissions.*' => 'string',
         ]);
 
-        // Validate all permissions are valid
-        $allValid = $this->getAllValidPermissions();
-        $invalid = array_diff($validated['permissions'], $allValid);
-        if (!empty($invalid)) {
-            return $this->error('Invalid permissions: ' . implode(', ', $invalid), 422);
+        // Validate all permissions are valid and only keep valid ones
+        if (isset($validated['permissions'])) {
+            $allValid = $this->getAllValidPermissions();
+            $validated['permissions'] = array_values(array_intersect($validated['permissions'], $allValid));
         }
 
         $role = Role::create($validated);
@@ -106,10 +105,7 @@ class RoleController extends Controller
 
         if (isset($validated['permissions'])) {
             $allValid = $this->getAllValidPermissions();
-            $invalid = array_diff($validated['permissions'], $allValid);
-            if (!empty($invalid)) {
-                return $this->error('Invalid permissions: ' . implode(', ', $invalid), 422);
-            }
+            $validated['permissions'] = array_values(array_intersect($validated['permissions'], $allValid));
         }
 
         $role->update($validated);
